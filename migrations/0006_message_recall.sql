@@ -1,0 +1,2 @@
+ALTER TABLE messages ADD COLUMN recalled_at INTEGER;
+ALTER TABLE messages ADD COLUMN recalled_by TEXT REFERENCES users(id) ON DELETE SET NULL;

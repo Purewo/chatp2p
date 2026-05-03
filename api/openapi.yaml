@@ -1,0 +1,1499 @@
+openapi: 3.1.0
+info:
+  title: ChatP2P Backend API
+  version: 0.1.0
+  description: Backend-only private chat service. Frontend teams should treat this file as the REST API contract.
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+tags:
+  - name: System
+    description: Service health and operational endpoints
+  - name: Auth
+    description: Registration, login, and token issuing
+  - name: Users
+    description: Authenticated user profile APIs
+  - name: Friends
+    description: Friend request and contact APIs
+  - name: Conversations
+    description: Conversation APIs
+  - name: Sync
+    description: Offline and reconnect synchronization APIs
+  - name: Realtime
+    description: WebSocket event stream
+paths:
+  /healthz:
+    get:
+      tags:
+        - System
+      summary: Check service health
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service is running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /api/v1/ws:
+    get:
+      tags:
+        - Realtime
+      summary: Open WebSocket event stream
+      operationId: openRealtimeWebSocket
+      description: Browser clients may pass `accessToken` as a query parameter. Non-browser clients should prefer `Authorization: Bearer <token>`.
+      parameters:
+        - name: accessToken
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Bearer token for clients that cannot set custom WebSocket headers.
+      responses:
+        "101":
+          description: WebSocket upgrade accepted. Events use `RealtimeEvent` envelopes.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/sync:
+    get:
+      tags:
+        - Sync
+      summary: Sync state after reconnect
+      operationId: syncState
+      description: Returns the current conversation list and messages created or updated after the supplied cursor. Use `serverTime` from the response as the next `since` value.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: since
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: Last successful sync time, usually the previous response's `serverTime`.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+          description: Maximum number of conversations and messages returned.
+      responses:
+        "200":
+          description: Synchronization snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/auth/register:
+    post:
+      tags:
+        - Auth
+      summary: Register a user
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: User was created and authenticated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/auth/login:
+    post:
+      tags:
+        - Auth
+      summary: Login with username and password
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Credentials were accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSession"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/users:
+    get:
+      tags:
+        - Users
+      summary: Search users
+      operationId: searchUsers
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 32
+          description: Matches username or display name.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        "200":
+          description: Matched users, excluding the current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSearchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/users/me:
+    get:
+      tags:
+        - Users
+      summary: Get current user profile
+      operationId: getCurrentUser
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current authenticated user profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    patch:
+      tags:
+        - Users
+      summary: Update current user profile
+      operationId: updateCurrentUser
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProfileUpdateRequest"
+      responses:
+        "200":
+          description: Updated authenticated user profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/friend-requests:
+    post:
+      tags:
+        - Friends
+      summary: Send a friend request
+      operationId: sendFriendRequest
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendFriendRequestRequest"
+      responses:
+        "201":
+          description: Friend request was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FriendRequest"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    get:
+      tags:
+        - Friends
+      summary: List friend requests
+      operationId: listFriendRequests
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: box
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - incoming
+              - outgoing
+              - all
+            default: incoming
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - pending
+              - accepted
+              - declined
+            default: pending
+      responses:
+        "200":
+          description: Friend requests for the selected box and status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FriendRequestListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/friend-requests/{id}/accept:
+    post:
+      tags:
+        - Friends
+      summary: Accept a friend request
+      operationId: acceptFriendRequest
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/FriendRequestId"
+      responses:
+        "200":
+          description: Friend request was accepted and a direct conversation is available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FriendRequestActionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/friend-requests/{id}/decline:
+    post:
+      tags:
+        - Friends
+      summary: Decline a friend request
+      operationId: declineFriendRequest
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/FriendRequestId"
+      responses:
+        "200":
+          description: Friend request was declined.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FriendRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/friends:
+    get:
+      tags:
+        - Friends
+      summary: List current user's friends
+      operationId: listFriends
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current user's friends.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FriendListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/conversations:
+    get:
+      tags:
+        - Conversations
+      summary: List current user's conversations
+      operationId: listConversations
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: before
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Returns conversations updated before this timestamp.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Conversations ordered by latest activity first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/conversations/direct:
+    post:
+      tags:
+        - Conversations
+      summary: Get or create a direct conversation with a friend
+      operationId: createDirectConversation
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DirectConversationRequest"
+      responses:
+        "200":
+          description: Existing or newly created direct conversation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/group:
+    post:
+      tags:
+        - Conversations
+      summary: Create a group conversation
+      operationId: createGroupConversation
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGroupConversationRequest"
+      responses:
+        "201":
+          description: Group conversation was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversationId}:
+    patch:
+      tags:
+        - Conversations
+      summary: Rename a group conversation
+      operationId: renameGroupConversation
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RenameGroupConversationRequest"
+      responses:
+        "200":
+          description: Group conversation was renamed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversationId}/owner:
+    patch:
+      tags:
+        - Conversations
+      summary: Transfer group ownership
+      operationId: transferGroupConversationOwner
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferGroupConversationOwnerRequest"
+      responses:
+        "200":
+          description: Group owner was transferred.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversationId}/members:
+    post:
+      tags:
+        - Conversations
+      summary: Add members to a group conversation
+      operationId: addGroupConversationMembers
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddGroupConversationMembersRequest"
+      responses:
+        "200":
+          description: Members were added to the group conversation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/conversations/{conversationId}/members/{userId}:
+    delete:
+      tags:
+        - Conversations
+      summary: Remove a member from a group conversation
+      operationId: removeGroupConversationMember
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Member was removed from the group conversation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversationId}/leave:
+    post:
+      tags:
+        - Conversations
+      summary: Leave a group conversation
+      operationId: leaveGroupConversation
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      responses:
+        "200":
+          description: Current user left the group conversation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Conversation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversationId}/messages:
+    post:
+      tags:
+        - Conversations
+      summary: Send a message in a conversation
+      operationId: sendMessage
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "201":
+          description: Message was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    get:
+      tags:
+        - Conversations
+      summary: List conversation messages
+      operationId: listMessages
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - name: before
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Returns messages older than this timestamp.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Messages ordered from oldest to newest within the returned page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversationId}/messages/{messageId}:
+    patch:
+      tags:
+        - Conversations
+      summary: Edit a message
+      operationId: editMessage
+      description: The original sender can edit their own non-recalled text message. Edited messages keep the same `id` and include edit metadata.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/MessageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EditMessageRequest"
+      responses:
+        "200":
+          description: Message was edited.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/conversations/{conversationId}/messages/{messageId}/recall:
+    post:
+      tags:
+        - Conversations
+      summary: Recall a message
+      operationId: recallMessage
+      description: The original sender can recall their own message. Recalled messages keep the same `id`, return an empty `body`, and include recall metadata.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "200":
+          description: Message was recalled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/conversations/{conversationId}/read:
+    post:
+      tags:
+        - Conversations
+      summary: Mark a conversation read through a message
+      operationId: markConversationRead
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MarkReadRequest"
+      responses:
+        "200":
+          description: Messages through the target message were marked read for the current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadThroughResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+components:
+  parameters:
+    FriendRequestId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    MessageId:
+      name: messageId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    BadRequest:
+      description: The request body or fields are invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Authentication failed or the bearer token is invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: The authenticated user cannot perform this operation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: The requested resource was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: A conflicting resource already exists.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - service
+        - version
+        - startedAt
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: chatp2p
+        version:
+          type: string
+          example: 0.1.0
+        startedAt:
+          type: string
+          format: date-time
+          example: "2026-05-04T01:00:00Z"
+    RealtimeEvent:
+      type: object
+      required:
+        - type
+        - data
+        - sentAt
+      properties:
+        type:
+          type: string
+          enum:
+            - message.created
+            - message.edited
+            - message.recalled
+            - message.read
+            - conversation.updated
+            - presence.updated
+            - typing.started
+            - typing.stopped
+        data:
+          oneOf:
+            - $ref: "#/components/schemas/Message"
+            - $ref: "#/components/schemas/MessageReadEvent"
+            - $ref: "#/components/schemas/ConversationUpdatedEvent"
+            - $ref: "#/components/schemas/PresenceEvent"
+            - $ref: "#/components/schemas/TypingEvent"
+        sentAt:
+          type: string
+          format: date-time
+    RealtimeClientEvent:
+      type: object
+      required:
+        - type
+        - data
+      properties:
+        type:
+          type: string
+          enum:
+            - typing.started
+            - typing.stopped
+        data:
+          $ref: "#/components/schemas/TypingClientPayload"
+    TypingClientPayload:
+      type: object
+      required:
+        - conversationId
+      properties:
+        conversationId:
+          type: string
+          format: uuid
+    SyncResponse:
+      type: object
+      required:
+        - serverTime
+        - conversations
+        - messages
+      properties:
+        serverTime:
+          type: string
+          format: date-time
+          description: Server-side snapshot time. Store this as the next `since` cursor after processing the response.
+        conversations:
+          type: array
+          description: Current conversation summaries for the chat home view.
+          items:
+            $ref: "#/components/schemas/ConversationSummary"
+        messages:
+          type: array
+          description: Messages created or updated after `since`, ordered oldest to newest by update time.
+          items:
+            $ref: "#/components/schemas/Message"
+    RegisterRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 32
+          example: alice
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 72
+          example: password123
+        displayName:
+          type: string
+          maxLength: 32
+          example: Alice
+        avatarUrl:
+          type: string
+          maxLength: 2048
+          description: Optional avatar image URL. Absolute http(s) URLs and app-relative paths are accepted.
+          example: https://cdn.example.com/avatars/alice.png
+        bio:
+          type: string
+          maxLength: 160
+          example: Ready to chat.
+    LoginRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          example: alice
+        password:
+          type: string
+          format: password
+          example: password123
+    AuthSession:
+      type: object
+      required:
+        - accessToken
+        - tokenType
+        - expiresIn
+        - user
+      properties:
+        accessToken:
+          type: string
+          description: Bearer token for authenticated API calls.
+        tokenType:
+          type: string
+          enum:
+            - Bearer
+        expiresIn:
+          type: integer
+          format: int64
+          description: Token lifetime in seconds.
+          example: 86400
+        user:
+          $ref: "#/components/schemas/UserProfile"
+    UserSearchResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserProfile"
+    ProfileUpdateRequest:
+      type: object
+      properties:
+        displayName:
+          type: string
+          maxLength: 32
+          example: Alice Updated
+        avatarUrl:
+          type: string
+          maxLength: 2048
+          description: Send an empty string to clear the avatar.
+          example: /avatars/alice.png
+        bio:
+          type: string
+          maxLength: 160
+          description: Send an empty string to clear the bio.
+          example: Usually online at night.
+    SendFriendRequestRequest:
+      type: object
+      required:
+        - targetUserId
+      properties:
+        targetUserId:
+          type: string
+          format: uuid
+        message:
+          type: string
+          maxLength: 120
+          example: Hi, let's chat.
+    FriendRequest:
+      type: object
+      required:
+        - id
+        - requester
+        - addressee
+        - message
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        requester:
+          $ref: "#/components/schemas/UserProfile"
+        addressee:
+          $ref: "#/components/schemas/UserProfile"
+        message:
+          type: string
+        status:
+          type: string
+          enum:
+            - pending
+            - accepted
+            - declined
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    FriendRequestListResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FriendRequest"
+    FriendRequestActionResponse:
+      type: object
+      required:
+        - request
+        - conversation
+      properties:
+        request:
+          $ref: "#/components/schemas/FriendRequest"
+        conversation:
+          $ref: "#/components/schemas/Conversation"
+    FriendListResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Friend"
+    Friend:
+      type: object
+      required:
+        - user
+        - friendSince
+      properties:
+        user:
+          $ref: "#/components/schemas/UserProfile"
+        friendSince:
+          type: string
+          format: date-time
+    DirectConversationRequest:
+      type: object
+      required:
+        - targetUserId
+      properties:
+        targetUserId:
+          type: string
+          format: uuid
+    CreateGroupConversationRequest:
+      type: object
+      required:
+        - title
+        - memberIds
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 64
+          example: Weekend Plans
+        memberIds:
+          type: array
+          minItems: 1
+          maxItems: 50
+          uniqueItems: true
+          description: Friend user IDs to add to the group. The creator is added automatically.
+          items:
+            type: string
+            format: uuid
+    TransferGroupConversationOwnerRequest:
+      type: object
+      required:
+        - targetUserId
+      properties:
+        targetUserId:
+          type: string
+          format: uuid
+          description: Current group member who will become the new owner.
+    RenameGroupConversationRequest:
+      type: object
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 64
+          example: Weekend Plans Updated
+    AddGroupConversationMembersRequest:
+      type: object
+      required:
+        - memberIds
+      properties:
+        memberIds:
+          type: array
+          minItems: 1
+          maxItems: 50
+          uniqueItems: true
+          description: Friend user IDs to add to the group. Existing members are rejected.
+          items:
+            type: string
+            format: uuid
+    ConversationListResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConversationSummary"
+    ConversationSummary:
+      type: object
+      required:
+        - id
+        - type
+        - title
+        - createdBy
+        - members
+        - lastMessage
+        - unreadCount
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum:
+            - direct
+            - group
+        title:
+          type: string
+        createdBy:
+          type: string
+          format: uuid
+          description: User ID that currently owns the conversation.
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserProfile"
+        lastMessage:
+          description: Latest message in this conversation, or null when no message has been sent yet.
+          anyOf:
+            - $ref: "#/components/schemas/Message"
+            - type: "null"
+        unreadCount:
+          type: integer
+          minimum: 0
+          description: Count of messages from other members that the current user has not marked read.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Conversation:
+      type: object
+      required:
+        - id
+        - type
+        - title
+        - createdBy
+        - members
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum:
+            - direct
+            - group
+        title:
+          type: string
+        createdBy:
+          type: string
+          format: uuid
+          description: User ID that currently owns the conversation.
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserProfile"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    SendMessageRequest:
+      type: object
+      required:
+        - body
+      properties:
+        type:
+          type: string
+          enum:
+            - text
+          default: text
+        body:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          example: hello
+    EditMessageRequest:
+      type: object
+      required:
+        - body
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          example: updated message text
+    MessageListResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+    Message:
+      type: object
+      required:
+        - id
+        - conversationId
+        - sender
+        - type
+        - body
+        - readBy
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        conversationId:
+          type: string
+          format: uuid
+        sender:
+          $ref: "#/components/schemas/UserProfile"
+        type:
+          type: string
+          enum:
+            - text
+        body:
+          type: string
+          description: Message text. This is an empty string after the message has been recalled.
+        readBy:
+          type: array
+          description: Users who have marked this message as read.
+          items:
+            $ref: "#/components/schemas/ReadReceipt"
+        editedAt:
+          type: string
+          format: date-time
+          description: Present when the message has been edited.
+        editedBy:
+          description: User who last edited the message. Present when `editedAt` is present.
+          allOf:
+            - $ref: "#/components/schemas/UserProfile"
+        recalledAt:
+          type: string
+          format: date-time
+          description: Present when the message has been recalled.
+        recalledBy:
+          description: User who recalled the message. Present when `recalledAt` is present.
+          allOf:
+            - $ref: "#/components/schemas/UserProfile"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ReadReceipt:
+      type: object
+      required:
+        - user
+        - readAt
+      properties:
+        user:
+          $ref: "#/components/schemas/UserProfile"
+        readAt:
+          type: string
+          format: date-time
+    MarkReadRequest:
+      type: object
+      required:
+        - messageId
+      properties:
+        messageId:
+          type: string
+          format: uuid
+    ReadThroughResponse:
+      type: object
+      required:
+        - conversationId
+        - readThroughMessageId
+        - readAt
+      properties:
+        conversationId:
+          type: string
+          format: uuid
+        readThroughMessageId:
+          type: string
+          format: uuid
+        readAt:
+          type: string
+          format: date-time
+    MessageReadEvent:
+      type: object
+      required:
+        - conversationId
+        - readThroughMessageId
+        - reader
+        - readAt
+      properties:
+        conversationId:
+          type: string
+          format: uuid
+        readThroughMessageId:
+          type: string
+          format: uuid
+        reader:
+          $ref: "#/components/schemas/UserProfile"
+        readAt:
+          type: string
+          format: date-time
+    ConversationUpdatedEvent:
+      type: object
+      required:
+        - conversationId
+        - conversation
+        - actor
+        - action
+        - occurredAt
+      properties:
+        conversationId:
+          type: string
+          format: uuid
+        conversation:
+          $ref: "#/components/schemas/Conversation"
+        actor:
+          $ref: "#/components/schemas/UserProfile"
+        action:
+          type: string
+          enum:
+            - renamed
+            - owner_transferred
+            - members_added
+            - member_removed
+            - member_left
+        member:
+          description: Affected member for owner transfer, remove, and leave actions.
+          anyOf:
+            - $ref: "#/components/schemas/UserProfile"
+            - type: "null"
+        members:
+          type: array
+          description: Added members for the `members_added` action.
+          items:
+            $ref: "#/components/schemas/UserProfile"
+        occurredAt:
+          type: string
+          format: date-time
+    PresenceEvent:
+      type: object
+      required:
+        - user
+        - status
+        - online
+        - changedAt
+      properties:
+        user:
+          $ref: "#/components/schemas/UserProfile"
+        status:
+          type: string
+          enum:
+            - online
+            - offline
+        online:
+          type: boolean
+        changedAt:
+          type: string
+          format: date-time
+    TypingEvent:
+      type: object
+      required:
+        - conversationId
+        - user
+        - state
+        - occurredAt
+      properties:
+        conversationId:
+          type: string
+          format: uuid
+        user:
+          $ref: "#/components/schemas/UserProfile"
+        state:
+          type: string
+          enum:
+            - started
+            - stopped
+        occurredAt:
+          type: string
+          format: date-time
+    UserProfile:
+      type: object
+      required:
+        - id
+        - username
+        - displayName
+        - avatarUrl
+        - bio
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "2d5b8f2e-7c71-44bd-bb5f-3f4b7c945ef3"
+        username:
+          type: string
+          example: alice
+        displayName:
+          type: string
+          example: Alice
+        avatarUrl:
+          type: string
+          example: https://cdn.example.com/avatars/alice.png
+        bio:
+          type: string
+          example: Ready to chat.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ErrorResponse:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          example: invalid_request
+        message:
+          type: string
+          example: request validation failed

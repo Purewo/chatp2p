@@ -1,0 +1,80 @@
+package httpapi
+
+import (
+	"net/http"
+	"time"
+
+	"chatp2p/internal/realtime"
+	"chatp2p/internal/service"
+)
+
+type RouterOptions struct {
+	ServiceName string
+	Version     string
+	StartedAt   time.Time
+	Auth        *service.AuthService
+	Social      *service.SocialService
+	Messages    *service.MessageService
+	Realtime    *realtime.Hub
+}
+
+type API struct {
+	serviceName string
+	version     string
+	startedAt   time.Time
+	auth        *service.AuthService
+	social      *service.SocialService
+	messages    *service.MessageService
+	realtime    *realtime.Hub
+}
+
+func NewRouter(opts RouterOptions) http.Handler {
+	if opts.ServiceName == "" {
+		opts.ServiceName = "chatp2p"
+	}
+	if opts.Version == "" {
+		opts.Version = "dev"
+	}
+	if opts.StartedAt.IsZero() {
+		opts.StartedAt = time.Now().UTC()
+	}
+
+	api := &API{
+		serviceName: opts.ServiceName,
+		version:     opts.Version,
+		startedAt:   opts.StartedAt,
+		auth:        opts.Auth,
+		social:      opts.Social,
+		messages:    opts.Messages,
+		realtime:    opts.Realtime,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", api.handleHealth)
+	mux.HandleFunc("GET /api/v1/ws", api.handleWebSocket)
+	mux.HandleFunc("GET /api/v1/sync", api.handleSync)
+	mux.HandleFunc("POST /api/v1/auth/register", api.handleRegister)
+	mux.HandleFunc("POST /api/v1/auth/login", api.handleLogin)
+	mux.HandleFunc("GET /api/v1/users/me", api.handleMe)
+	mux.HandleFunc("PATCH /api/v1/users/me", api.handleUpdateMe)
+	mux.HandleFunc("GET /api/v1/users", api.handleSearchUsers)
+	mux.HandleFunc("POST /api/v1/friend-requests", api.handleSendFriendRequest)
+	mux.HandleFunc("GET /api/v1/friend-requests", api.handleListFriendRequests)
+	mux.HandleFunc("POST /api/v1/friend-requests/{id}/accept", api.handleAcceptFriendRequest)
+	mux.HandleFunc("POST /api/v1/friend-requests/{id}/decline", api.handleDeclineFriendRequest)
+	mux.HandleFunc("GET /api/v1/friends", api.handleListFriends)
+	mux.HandleFunc("GET /api/v1/conversations", api.handleListConversations)
+	mux.HandleFunc("POST /api/v1/conversations/direct", api.handleCreateDirectConversation)
+	mux.HandleFunc("POST /api/v1/conversations/group", api.handleCreateGroupConversation)
+	mux.HandleFunc("PATCH /api/v1/conversations/{conversationId}", api.handleRenameGroupConversation)
+	mux.HandleFunc("PATCH /api/v1/conversations/{conversationId}/owner", api.handleTransferGroupConversationOwner)
+	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/members", api.handleAddGroupConversationMembers)
+	mux.HandleFunc("DELETE /api/v1/conversations/{conversationId}/members/{userId}", api.handleRemoveGroupConversationMember)
+	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/leave", api.handleLeaveGroupConversation)
+	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/messages", api.handleSendMessage)
+	mux.HandleFunc("GET /api/v1/conversations/{conversationId}/messages", api.handleListMessages)
+	mux.HandleFunc("PATCH /api/v1/conversations/{conversationId}/messages/{messageId}", api.handleEditMessage)
+	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/messages/{messageId}/recall", api.handleRecallMessage)
+	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/read", api.handleMarkConversationRead)
+	return mux
+}

@@ -1,0 +1,2 @@
+ALTER TABLE messages ADD COLUMN edited_at INTEGER;
+ALTER TABLE messages ADD COLUMN edited_by TEXT REFERENCES users(id) ON DELETE SET NULL;
