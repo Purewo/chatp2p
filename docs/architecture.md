@@ -19,6 +19,7 @@ ChatP2P is a backend-only private chat system. Frontend clients integrate throug
 - Group management is owner-controlled in the current version: the owner can rename, transfer ownership, invite friends, and remove members; non-owner members can leave.
 - Per-user conversation settings such as pin, mute, and archive are stored on the membership row so each user can organize the same conversation independently.
 - Messages are persisted before realtime delivery and include read receipts for conversation members.
+- Sticker packs are exposed through a server-managed catalog; sticker messages store the sticker id in the normal message body.
 - WebSocket connections handle message delivery, read-state notifications, friend presence, and typing state.
 - SQLite is the local development store for the current implementation.
 - PostgreSQL is the production target for users, conversations, memberships, messages, and delivery state.

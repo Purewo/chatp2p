@@ -13,6 +13,8 @@ tags:
     description: Registration, login, and token issuing
   - name: Users
     description: Authenticated user profile APIs
+  - name: Stickers
+    description: Built-in sticker pack catalog and assets
   - name: Friends
     description: Friend request and contact APIs
   - name: Conversations
@@ -41,7 +43,7 @@ paths:
         - Realtime
       summary: Open WebSocket event stream
       operationId: openRealtimeWebSocket
-      description: Browser clients may pass `accessToken` as a query parameter. Non-browser clients should prefer `Authorization: Bearer <token>`.
+      description: "Browser clients may pass `accessToken` as a query parameter. Non-browser clients should prefer `Authorization: Bearer <token>`."
       parameters:
         - name: accessToken
           in: query
@@ -144,6 +146,65 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /api/v1/sticker-packs:
+    get:
+      tags:
+        - Stickers
+      summary: List sticker packs
+      operationId: listStickerPacks
+      description: Returns built-in sticker packs and their stickers. Sticker message bodies should use the sticker `id`. Built-in assets are packaged from OpenMoji SVGs.
+      responses:
+        "200":
+          description: Sticker packs available to clients.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StickerPackListResponse"
+  /api/v1/sticker-packs/{packId}/stickers:
+    get:
+      tags:
+        - Stickers
+      summary: List stickers in a pack
+      operationId: listStickers
+      parameters:
+        - name: packId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: classic-faces
+      responses:
+        "200":
+          description: Stickers in the requested pack.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StickerListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/stickers/{stickerId}/asset.svg:
+    get:
+      tags:
+        - Stickers
+      summary: Get sticker SVG asset
+      operationId: getStickerAsset
+      parameters:
+        - name: stickerId
+          in: path
+          required: true
+          schema:
+            type: string
+          example: classic-smile
+      responses:
+        "200":
+          description: Sticker SVG image.
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v1/users:
     get:
       tags:
@@ -1121,6 +1182,79 @@ components:
           example: 86400
         user:
           $ref: "#/components/schemas/UserProfile"
+    StickerPackListResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/StickerPack"
+    StickerListResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Sticker"
+    StickerPack:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - builtIn
+      properties:
+        id:
+          type: string
+          example: classic-faces
+        name:
+          type: string
+          example: Little Yellow Faces
+        description:
+          type: string
+        builtIn:
+          type: boolean
+        stickers:
+          type: array
+          items:
+            $ref: "#/components/schemas/Sticker"
+    Sticker:
+      type: object
+      required:
+        - id
+        - packId
+        - name
+        - description
+        - keywords
+        - assetUrl
+        - mimeType
+      properties:
+        id:
+          type: string
+          example: classic-smile
+        packId:
+          type: string
+          example: classic-faces
+        name:
+          type: string
+          example: Smile
+        description:
+          type: string
+        keywords:
+          type: array
+          items:
+            type: string
+        assetUrl:
+          type: string
+          description: App-relative URL for the sticker image asset.
+          example: /api/v1/stickers/classic-smile/asset.svg
+        mimeType:
+          type: string
+          example: image/svg+xml
     UserSearchResponse:
       type: object
       required:
@@ -1459,11 +1593,14 @@ components:
           type: string
           enum:
             - text
+            - sticker
           default: text
+          description: Use `text` for normal chat text and `sticker` when `body` is a sticker id from the sticker catalog.
         body:
           type: string
           minLength: 1
           maxLength: 4000
+          description: Text content for `text` messages. Sticker id for `sticker` messages.
           example: hello
     EditMessageRequest:
       type: object
@@ -1511,9 +1648,10 @@ components:
           type: string
           enum:
             - text
+            - sticker
         body:
           type: string
-          description: Message text. This is an empty string after the message has been recalled.
+          description: Message text for `text`, sticker id for `sticker`. This is an empty string after the message has been recalled.
         readBy:
           type: array
           description: Users who have marked this message as read.

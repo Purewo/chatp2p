@@ -1,0 +1,108 @@
+{
+  "packs": [
+    {
+      "id": "classic-faces",
+      "name": "Little Yellow Faces",
+      "description": "Built-in classic chat sticker pack using OpenMoji yellow-face SVG assets.",
+      "builtIn": true,
+      "stickers": [
+        {
+          "id": "classic-smile",
+          "name": "Smile",
+          "description": "friendly little yellow face",
+          "keywords": ["smile", "happy"],
+          "assetFile": "classic-faces/classic-smile.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-grin",
+          "name": "Grin",
+          "description": "wide grin little yellow face",
+          "keywords": ["grin", "laugh"],
+          "assetFile": "classic-faces/classic-grin.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-laugh",
+          "name": "Laugh",
+          "description": "laughing little yellow face",
+          "keywords": ["laugh", "joy"],
+          "assetFile": "classic-faces/classic-laugh.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-wink",
+          "name": "Wink",
+          "description": "playful little yellow face",
+          "keywords": ["wink"],
+          "assetFile": "classic-faces/classic-wink.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-surprise",
+          "name": "Surprise",
+          "description": "surprised little yellow face",
+          "keywords": ["surprise", "wow"],
+          "assetFile": "classic-faces/classic-surprise.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-cool",
+          "name": "Cool",
+          "description": "sunglasses little yellow face",
+          "keywords": ["cool"],
+          "assetFile": "classic-faces/classic-cool.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-cry",
+          "name": "Cry",
+          "description": "crying little yellow face",
+          "keywords": ["cry", "sad"],
+          "assetFile": "classic-faces/classic-cry.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-angry",
+          "name": "Angry",
+          "description": "angry little yellow face",
+          "keywords": ["angry"],
+          "assetFile": "classic-faces/classic-angry.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-sleepy",
+          "name": "Sleepy",
+          "description": "sleepy little yellow face",
+          "keywords": ["sleepy", "tired"],
+          "assetFile": "classic-faces/classic-sleepy.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-love",
+          "name": "Love",
+          "description": "heart-eyed little yellow face",
+          "keywords": ["love", "heart"],
+          "assetFile": "classic-faces/classic-love.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-ok",
+          "name": "OK",
+          "description": "thumbs-up yellow hand",
+          "keywords": ["ok", "thumbs-up"],
+          "assetFile": "classic-faces/classic-ok.svg",
+          "mimeType": "image/svg+xml"
+        },
+        {
+          "id": "classic-awkward",
+          "name": "Awkward",
+          "description": "sweaty little yellow face",
+          "keywords": ["awkward", "sweat"],
+          "assetFile": "classic-faces/classic-awkward.svg",
+          "mimeType": "image/svg+xml"
+        }
+      ]
+    }
+  ]
+}

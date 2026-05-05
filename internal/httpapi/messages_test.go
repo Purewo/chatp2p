@@ -111,6 +111,74 @@ func TestMessageFlowSendsListsAndMarksRead(t *testing.T) {
 	}
 }
 
+func TestStickerMessageFlowSendsCatalogSticker(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, bob, conversationID := setupDirectConversation(t, router)
+
+	sendBody := []byte(`{"type":"sticker","body":"classic-smile"}`)
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID+"/messages", bytes.NewReader(sendBody))
+	sendReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	sendReq.Header.Set("Content-Type", "application/json")
+	sendRec := httptest.NewRecorder()
+	router.ServeHTTP(sendRec, sendReq)
+	if sendRec.Code != http.StatusCreated {
+		t.Fatalf("expected sticker send status %d, got %d: %s", http.StatusCreated, sendRec.Code, sendRec.Body.String())
+	}
+
+	var sent struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(sendRec.Body).Decode(&sent); err != nil {
+		t.Fatalf("decode sticker send response: %v", err)
+	}
+	if sent.ID == "" || sent.Type != "sticker" || sent.Body != "classic-smile" {
+		t.Fatalf("unexpected sticker message: %+v", sent)
+	}
+
+	editRec := editMessage(t, router, alice.AccessToken, conversationID, sent.ID, "edited sticker")
+	if editRec.Code != http.StatusConflict {
+		t.Fatalf("expected sticker edit status %d, got %d: %s", http.StatusConflict, editRec.Code, editRec.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conversationID+"/messages", nil)
+	listReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected sticker list status %d, got %d: %s", http.StatusOK, listRec.Code, listRec.Body.String())
+	}
+
+	var list struct {
+		Items []struct {
+			Type string `json:"type"`
+			Body string `json:"body"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(listRec.Body).Decode(&list); err != nil {
+		t.Fatalf("decode sticker list response: %v", err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Type != "sticker" || list.Items[0].Body != "classic-smile" {
+		t.Fatalf("unexpected sticker message list: %+v", list.Items)
+	}
+}
+
+func TestStickerMessageRejectsUnknownSticker(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, _, conversationID := setupDirectConversation(t, router)
+
+	sendBody := []byte(`{"type":"sticker","body":"missing-sticker"}`)
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID+"/messages", bytes.NewReader(sendBody))
+	sendReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	sendReq.Header.Set("Content-Type", "application/json")
+	sendRec := httptest.NewRecorder()
+	router.ServeHTTP(sendRec, sendReq)
+	if sendRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected unknown sticker status %d, got %d: %s", http.StatusBadRequest, sendRec.Code, sendRec.Body.String())
+	}
+}
+
 func TestMessageRecallUpdatesMessageAndEnforcesSender(t *testing.T) {
 	router := newSocialTestRouter(t)
 	alice, bob, conversationID := setupDirectConversation(t, router)

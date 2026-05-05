@@ -17,6 +17,7 @@ type RouterOptions struct {
 	Auth               *service.AuthService
 	Social             *service.SocialService
 	Messages           *service.MessageService
+	Stickers           *service.StickerService
 	Realtime           *realtime.Hub
 }
 
@@ -27,6 +28,7 @@ type API struct {
 	auth        *service.AuthService
 	social      *service.SocialService
 	messages    *service.MessageService
+	stickers    *service.StickerService
 	realtime    *realtime.Hub
 }
 
@@ -40,6 +42,9 @@ func NewRouter(opts RouterOptions) http.Handler {
 	if opts.StartedAt.IsZero() {
 		opts.StartedAt = time.Now().UTC()
 	}
+	if opts.Stickers == nil {
+		opts.Stickers = service.NewStickerService()
+	}
 
 	api := &API{
 		serviceName: opts.ServiceName,
@@ -48,6 +53,7 @@ func NewRouter(opts RouterOptions) http.Handler {
 		auth:        opts.Auth,
 		social:      opts.Social,
 		messages:    opts.Messages,
+		stickers:    opts.Stickers,
 		realtime:    opts.Realtime,
 	}
 
@@ -60,6 +66,9 @@ func NewRouter(opts RouterOptions) http.Handler {
 	mux.HandleFunc("GET /api/v1/users/me", api.handleMe)
 	mux.HandleFunc("PATCH /api/v1/users/me", api.handleUpdateMe)
 	mux.HandleFunc("GET /api/v1/users", api.handleSearchUsers)
+	mux.HandleFunc("GET /api/v1/sticker-packs", api.handleListStickerPacks)
+	mux.HandleFunc("GET /api/v1/sticker-packs/{packId}/stickers", api.handleListStickers)
+	mux.HandleFunc("GET /api/v1/stickers/{stickerId}/asset.svg", api.handleStickerAsset)
 	mux.HandleFunc("POST /api/v1/friend-requests", api.handleSendFriendRequest)
 	mux.HandleFunc("GET /api/v1/friend-requests", api.handleListFriendRequests)
 	mux.HandleFunc("POST /api/v1/friend-requests/{id}/accept", api.handleAcceptFriendRequest)

@@ -30,10 +30,15 @@ type MessageStore interface {
 	MarkConversationRead(context.Context, string, string, string, time.Time) (model.ReadThroughResult, error)
 }
 
+type MessageStickerCatalog interface {
+	FindSticker(string) (model.Sticker, bool)
+}
+
 type MessageService struct {
-	auth  *AuthService
-	store MessageStore
-	now   func() time.Time
+	auth     *AuthService
+	store    MessageStore
+	stickers MessageStickerCatalog
+	now      func() time.Time
 }
 
 type MessageInput struct {
@@ -111,10 +116,15 @@ type syncCursorPayload struct {
 }
 
 func NewMessageService(authService *AuthService, messageStore MessageStore) *MessageService {
+	return NewMessageServiceWithStickers(authService, messageStore, NewStickerService())
+}
+
+func NewMessageServiceWithStickers(authService *AuthService, messageStore MessageStore, stickers MessageStickerCatalog) *MessageService {
 	return &MessageService{
-		auth:  authService,
-		store: messageStore,
-		now:   time.Now,
+		auth:     authService,
+		store:    messageStore,
+		stickers: stickers,
+		now:      time.Now,
 	}
 }
 
@@ -136,12 +146,12 @@ func (s *MessageService) SendMessage(ctx context.Context, token string, input Me
 	if messageType == "" {
 		messageType = model.MessageTypeText
 	}
-	if messageType != model.MessageTypeText {
+	if messageType != model.MessageTypeText && messageType != model.MessageTypeSticker {
 		return model.MessageView{}, ErrInvalidInput
 	}
 
 	body := strings.TrimSpace(input.Body)
-	if body == "" || utf8.RuneCountInString(body) > 4000 {
+	if err := s.validateMessageBody(messageType, body); err != nil {
 		return model.MessageView{}, ErrInvalidInput
 	}
 
@@ -166,6 +176,28 @@ func (s *MessageService) SendMessage(ctx context.Context, token string, input Me
 	}
 
 	return s.store.FindMessageByID(ctx, messageID)
+}
+
+func (s *MessageService) validateMessageBody(messageType, body string) error {
+	switch messageType {
+	case model.MessageTypeText:
+		if body == "" || utf8.RuneCountInString(body) > 4000 {
+			return ErrInvalidInput
+		}
+	case model.MessageTypeSticker:
+		if body == "" || utf8.RuneCountInString(body) > 80 {
+			return ErrInvalidInput
+		}
+		if s.stickers == nil {
+			return ErrInvalidInput
+		}
+		if _, ok := s.stickers.FindSticker(body); !ok {
+			return ErrInvalidInput
+		}
+	default:
+		return ErrInvalidInput
+	}
+	return nil
 }
 
 func (s *MessageService) ListMessages(ctx context.Context, token string, filter MessageListFilter) (MessageListPage, error) {
@@ -527,6 +559,20 @@ func (s *MessageService) EditMessage(ctx context.Context, token string, input Ed
 	}
 	if err := s.requireConversationMember(ctx, conversationID, actor.ID); err != nil {
 		return model.MessageView{}, err
+	}
+
+	existingMessage, err := s.store.FindMessageByID(ctx, messageID)
+	if err != nil {
+		return model.MessageView{}, mapMessageStoreError(err)
+	}
+	if existingMessage.ConversationID != conversationID {
+		return model.MessageView{}, ErrNotFound
+	}
+	if existingMessage.Sender.ID != actor.ID {
+		return model.MessageView{}, ErrForbidden
+	}
+	if existingMessage.Type != model.MessageTypeText {
+		return model.MessageView{}, ErrConflict
 	}
 
 	message, err := s.store.EditMessage(ctx, conversationID, messageID, actor.ID, body, s.now().UTC())

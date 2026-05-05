@@ -13,7 +13,18 @@ Use `POST /api/v1/conversations/{conversationId}/messages` with:
 }
 ```
 
-Only `text` messages are supported in the current version. Empty messages are rejected, and `body` is limited to 4000 characters.
+For `text` messages, empty messages are rejected, and `body` is limited to 4000 characters.
+
+Sticker messages use the same endpoint with `type` set to `sticker` and `body` set to a sticker id from the sticker catalog:
+
+```json
+{
+  "type": "sticker",
+  "body": "classic-smile"
+}
+```
+
+Unknown sticker ids are rejected. Sticker assets and pack metadata are documented in `docs/stickers.md`.
 
 ## Message Edit
 
@@ -25,7 +36,7 @@ Use `PATCH /api/v1/conversations/{conversationId}/messages/{messageId}` with:
 }
 ```
 
-Only the original sender can edit their own non-recalled message. Empty edits are rejected, and `body` is limited to 4000 characters. The response is the updated `Message`. After edit, `editedAt` is set and `editedBy` contains the user who performed the edit.
+Only the original sender can edit their own non-recalled text message. Sticker messages cannot be edited. Empty edits are rejected, and `body` is limited to 4000 characters. The response is the updated `Message`. After edit, `editedAt` is set and `editedBy` contains the user who performed the edit.
 
 ## Message Recall
 

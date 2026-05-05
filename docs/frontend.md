@@ -22,8 +22,9 @@ There is currently no refresh-token flow. The frontend should treat `401` as a s
 1. Call `GET /api/v1/users/me`.
 2. Call `GET /api/v1/conversations?limit=50`.
 3. Load the active thread with `GET /api/v1/conversations/{conversationId}/messages?limit=50`.
-4. Seed the sync cursor once with `GET /api/v1/sync?since=<current RFC3339 time>&limit=1` and store the returned `nextCursor`.
-5. Open the WebSocket connection.
+4. Load sticker packs with `GET /api/v1/sticker-packs` and cache sticker assets by `assetUrl`.
+5. Seed the sync cursor once with `GET /api/v1/sync?since=<current RFC3339 time>&limit=1` and store the returned `nextCursor`.
+6. Open the WebSocket connection.
 
 ## Realtime Recovery
 
@@ -60,6 +61,7 @@ Do not combine `cursor` with the legacy `before` or `since` timestamp parameters
 - Accept friend request: `POST /api/v1/friend-requests/{id}/accept`
 - Open direct chat: `POST /api/v1/conversations/direct`
 - Send message: `POST /api/v1/conversations/{conversationId}/messages`
+- Send sticker: `POST /api/v1/conversations/{conversationId}/messages` with `{ "type": "sticker", "body": "<stickerId>" }`
 - Mark read: `POST /api/v1/conversations/{conversationId}/read`
 - Update per-thread settings: `PATCH /api/v1/conversations/{conversationId}/settings`
 

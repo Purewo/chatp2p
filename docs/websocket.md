@@ -58,6 +58,7 @@ Use `typing.stopped` with the same payload when the input is cleared, submitted,
 
 - The server accepts the connection only after token validation.
 - Message create, edit, recall, and read events are broadcast to all members of the conversation, including the actor.
+- Sticker messages are delivered through `message.created` using the normal `Message` shape with `type: "sticker"` and `body` set to the sticker id.
 - Edited message payloads keep the original `id`; `body` contains the updated text, and `editedAt` and `editedBy` are present.
 - Recalled message payloads keep the original `id`; `body` is empty and `recalledAt` is present.
 - Conversation update events are broadcast to the relevant conversation members, and the payload includes the updated conversation plus the actor and affected member list when applicable.

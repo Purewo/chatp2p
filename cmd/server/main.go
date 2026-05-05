@@ -43,12 +43,13 @@ func main() {
 	tokenManager := auth.NewManager(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTTTL)
 	authService := service.NewAuthService(userStore, tokenManager)
 	socialService := service.NewSocialService(authService, userStore)
-	messageService := service.NewMessageService(authService, userStore)
+	stickerService := service.NewStickerService()
+	messageService := service.NewMessageServiceWithStickers(authService, userStore, stickerService)
 	realtimeHub := realtime.NewHub()
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewRouter(httpapi.RouterOptions{ServiceName: cfg.AppName, Version: version, CORSAllowedOrigins: cfg.CORSAllowedOrigins, Auth: authService, Social: socialService, Messages: messageService, Realtime: realtimeHub}),
+		Handler:           httpapi.NewRouter(httpapi.RouterOptions{ServiceName: cfg.AppName, Version: version, CORSAllowedOrigins: cfg.CORSAllowedOrigins, Auth: authService, Social: socialService, Messages: messageService, Stickers: stickerService, Realtime: realtimeHub}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

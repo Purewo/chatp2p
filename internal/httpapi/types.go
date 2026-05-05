@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -18,12 +19,15 @@ func readJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		slog.Warn("request JSON decode failed", "method", r.Method, "path", r.URL.Path, "error", err)
 		return err
 	}
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
+			slog.Warn("request JSON decode failed", "method", r.Method, "path", r.URL.Path, "error", "unexpected additional json content")
 			return errors.New("unexpected additional json content")
 		}
+		slog.Warn("request JSON decode failed", "method", r.Method, "path", r.URL.Path, "error", err)
 		return err
 	}
 	return nil

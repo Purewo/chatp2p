@@ -2,7 +2,10 @@ package model
 
 import "time"
 
-const MessageTypeText = "text"
+const (
+	MessageTypeText    = "text"
+	MessageTypeSticker = "sticker"
+)
 
 type Message struct {
 	ID             string

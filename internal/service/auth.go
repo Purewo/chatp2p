@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -181,22 +182,27 @@ func (s *AuthService) userForToken(ctx context.Context, token string) (model.Use
 func (s *AuthService) buildUser(input Credentials) (model.User, error) {
 	username, err := normalizeUsername(input.Username)
 	if err != nil {
+		slog.Warn("auth validation failed", "operation", "register", "field", "username", "reason", authValidationReason(err))
 		return model.User{}, ErrInvalidInput
 	}
 	password := input.Password
 	if err := validatePassword(password); err != nil {
+		slog.Warn("auth validation failed", "operation", "register", "field", "password", "reason", authValidationReason(err))
 		return model.User{}, ErrInvalidInput
 	}
 	displayName, err := normalizeDisplayName(input.DisplayName, username)
 	if err != nil {
+		slog.Warn("auth validation failed", "operation", "register", "field", "displayName", "reason", authValidationReason(err))
 		return model.User{}, ErrInvalidInput
 	}
 	avatarURL, err := normalizeAvatarURL(input.AvatarURL)
 	if err != nil {
+		slog.Warn("auth validation failed", "operation", "register", "field", "avatarUrl", "reason", authValidationReason(err))
 		return model.User{}, ErrInvalidInput
 	}
 	bio, err := normalizeBio(input.Bio)
 	if err != nil {
+		slog.Warn("auth validation failed", "operation", "register", "field", "bio", "reason", authValidationReason(err))
 		return model.User{}, ErrInvalidInput
 	}
 
@@ -241,14 +247,14 @@ func normalizeUsername(input string) (string, error) {
 	username := strings.ToLower(strings.TrimSpace(input))
 	usernameLength := utf8.RuneCountInString(username)
 	if usernameLength < 3 || usernameLength > 32 {
-		return "", ErrInvalidInput
+		return "", validationError("length_must_be_3_to_32")
 	}
 
 	for _, r := range username {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.' {
 			continue
 		}
-		return "", ErrInvalidInput
+		return "", validationError("allowed_characters_are_letters_digits_underscore_dash_dot")
 	}
 
 	return username, nil
@@ -260,7 +266,7 @@ func normalizeDisplayName(input, fallback string) (string, error) {
 		displayName = fallback
 	}
 	if utf8.RuneCountInString(displayName) > 32 {
-		return "", ErrInvalidInput
+		return "", validationError("length_must_be_at_most_32")
 	}
 	return displayName, nil
 }
@@ -268,7 +274,7 @@ func normalizeDisplayName(input, fallback string) (string, error) {
 func normalizeRequiredDisplayName(input string) (string, error) {
 	displayName := strings.TrimSpace(input)
 	if displayName == "" || utf8.RuneCountInString(displayName) > 32 {
-		return "", ErrInvalidInput
+		return "", validationError("length_must_be_1_to_32")
 	}
 	return displayName, nil
 }
@@ -279,7 +285,7 @@ func normalizeAvatarURL(input string) (string, error) {
 		return "", nil
 	}
 	if len(avatarURL) > 2048 {
-		return "", ErrInvalidInput
+		return "", validationError("length_must_be_at_most_2048")
 	}
 	if strings.HasPrefix(avatarURL, "/") {
 		return avatarURL, nil
@@ -287,10 +293,10 @@ func normalizeAvatarURL(input string) (string, error) {
 
 	parsed, err := url.Parse(avatarURL)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" {
-		return "", ErrInvalidInput
+		return "", validationError("must_be_absolute_http_url_or_app_relative_path")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", ErrInvalidInput
+		return "", validationError("scheme_must_be_http_or_https")
 	}
 	return avatarURL, nil
 }
@@ -298,14 +304,28 @@ func normalizeAvatarURL(input string) (string, error) {
 func normalizeBio(input string) (string, error) {
 	bio := strings.TrimSpace(input)
 	if utf8.RuneCountInString(bio) > 160 {
-		return "", ErrInvalidInput
+		return "", validationError("length_must_be_at_most_160")
 	}
 	return bio, nil
 }
 
 func validatePassword(password string) error {
 	if len(password) < 8 || len(password) > 72 {
-		return ErrInvalidInput
+		return validationError("length_must_be_8_to_72_bytes")
 	}
 	return nil
+}
+
+type validationError string
+
+func (e validationError) Error() string {
+	return string(e)
+}
+
+func authValidationReason(err error) string {
+	var validationErr validationError
+	if errors.As(err, &validationErr) {
+		return validationErr.Error()
+	}
+	return "invalid"
 }
