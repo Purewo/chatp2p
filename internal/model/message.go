@@ -13,6 +13,7 @@ type Message struct {
 	SenderID       string
 	Type           string
 	Body           string
+	QuoteMessageID string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
@@ -23,18 +24,34 @@ type ReadReceipt struct {
 }
 
 type MessageView struct {
-	ID             string        `json:"id"`
-	ConversationID string        `json:"conversationId"`
-	Sender         Profile       `json:"sender"`
-	Type           string        `json:"type"`
-	Body           string        `json:"body"`
-	ReadBy         []ReadReceipt `json:"readBy"`
-	EditedAt       *time.Time    `json:"editedAt,omitempty"`
-	EditedBy       *Profile      `json:"editedBy,omitempty"`
-	RecalledAt     *time.Time    `json:"recalledAt,omitempty"`
-	RecalledBy     *Profile      `json:"recalledBy,omitempty"`
-	CreatedAt      time.Time     `json:"createdAt"`
-	UpdatedAt      time.Time     `json:"updatedAt"`
+	ID             string         `json:"id"`
+	ConversationID string         `json:"conversationId"`
+	Sender         Profile        `json:"sender"`
+	Type           string         `json:"type"`
+	Body           string         `json:"body"`
+	QuotedMessage  *QuotedMessage `json:"quotedMessage,omitempty"`
+	ReadBy         []ReadReceipt  `json:"readBy"`
+	EditedAt       *time.Time     `json:"editedAt,omitempty"`
+	EditedBy       *Profile       `json:"editedBy,omitempty"`
+	RecalledAt     *time.Time     `json:"recalledAt,omitempty"`
+	RecalledBy     *Profile       `json:"recalledBy,omitempty"`
+	CreatedAt      time.Time      `json:"createdAt"`
+	UpdatedAt      time.Time      `json:"updatedAt"`
+}
+
+type QuotedMessage struct {
+	ID             string     `json:"id"`
+	ConversationID string     `json:"conversationId"`
+	Sender         Profile    `json:"sender"`
+	Type           string     `json:"type"`
+	Body           string     `json:"body"`
+	RecalledAt     *time.Time `json:"recalledAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+}
+
+type MessageFavorite struct {
+	Message     MessageView `json:"message"`
+	FavoritedAt time.Time   `json:"favoritedAt"`
 }
 
 type MessageListCursor struct {

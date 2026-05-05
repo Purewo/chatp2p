@@ -10,12 +10,26 @@ import (
 )
 
 type sendMessageRequest struct {
-	Type string `json:"type"`
-	Body string `json:"body"`
+	Type           string `json:"type"`
+	Body           string `json:"body"`
+	QuoteMessageID string `json:"quoteMessageId"`
 }
 
 type editMessageRequest struct {
 	Body string `json:"body"`
+}
+
+type forwardMessageRequest struct {
+	TargetConversationID string `json:"targetConversationId"`
+}
+
+type forwardMessagesRequest struct {
+	MessageIDs           []string `json:"messageIds"`
+	TargetConversationID string   `json:"targetConversationId"`
+}
+
+type messageIDsRequest struct {
+	MessageIDs []string `json:"messageIds"`
 }
 
 type conversationSettingsRequest struct {
@@ -36,6 +50,18 @@ type conversationListResponse struct {
 
 type markReadRequest struct {
 	MessageID string `json:"messageId"`
+}
+
+type messageBatchResponse struct {
+	Items []model.MessageView `json:"items"`
+}
+
+type messageFavoriteListResponse struct {
+	Items []model.MessageFavorite `json:"items"`
+}
+
+type messageDeleteBatchResponse struct {
+	DeletedMessageIDs []string `json:"deletedMessageIds"`
 }
 
 func (api *API) handleSync(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +187,7 @@ func (api *API) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		ConversationID: r.PathValue("conversationId"),
 		Type:           req.Type,
 		Body:           req.Body,
+		QuoteMessageID: req.QuoteMessageID,
 	})
 	if err != nil {
 		api.writeServiceError(w, err)
@@ -263,6 +290,183 @@ func (api *API) handleRecallMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, message)
 }
 
+func (api *API) handleForwardMessage(w http.ResponseWriter, r *http.Request) {
+	token := api.requireToken(w, r, api.messages != nil)
+	if token == "" {
+		return
+	}
+
+	var req forwardMessageRequest
+	if err := readJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is invalid JSON")
+		return
+	}
+
+	messages, err := api.messages.ForwardMessages(r.Context(), token, service.ForwardInput{
+		SourceConversationID: r.PathValue("conversationId"),
+		MessageIDs:           []string{r.PathValue("messageId")},
+		TargetConversationID: req.TargetConversationID,
+	})
+	if err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	api.publishCreatedMessages(r, token, messages)
+	writeJSON(w, http.StatusCreated, messages[0])
+}
+
+func (api *API) handleForwardMessages(w http.ResponseWriter, r *http.Request) {
+	token := api.requireToken(w, r, api.messages != nil)
+	if token == "" {
+		return
+	}
+
+	var req forwardMessagesRequest
+	if err := readJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is invalid JSON")
+		return
+	}
+
+	messages, err := api.messages.ForwardMessages(r.Context(), token, service.ForwardInput{
+		SourceConversationID: r.PathValue("conversationId"),
+		MessageIDs:           req.MessageIDs,
+		TargetConversationID: req.TargetConversationID,
+	})
+	if err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	api.publishCreatedMessages(r, token, messages)
+	writeJSON(w, http.StatusCreated, messageBatchResponse{Items: messages})
+}
+
+func (api *API) handleDeleteMessageForMe(w http.ResponseWriter, r *http.Request) {
+	token := api.requireToken(w, r, api.messages != nil)
+	if token == "" {
+		return
+	}
+
+	if _, err := api.messages.DeleteMessagesForMe(r.Context(), token, service.MessageIDsInput{
+		ConversationID: r.PathValue("conversationId"),
+		MessageIDs:     []string{r.PathValue("messageId")},
+	}); err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (api *API) handleDeleteMessagesForMe(w http.ResponseWriter, r *http.Request) {
+	token := api.requireToken(w, r, api.messages != nil)
+	if token == "" {
+		return
+	}
+
+	var req messageIDsRequest
+	if err := readJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is invalid JSON")
+		return
+	}
+
+	deletedIDs, err := api.messages.DeleteMessagesForMe(r.Context(), token, service.MessageIDsInput{
+		ConversationID: r.PathValue("conversationId"),
+		MessageIDs:     req.MessageIDs,
+	})
+	if err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, messageDeleteBatchResponse{DeletedMessageIDs: deletedIDs})
+}
+
+func (api *API) handleFavoriteMessage(w http.ResponseWriter, r *http.Request) {
+	token := api.requireToken(w, r, api.messages != nil)
+	if token == "" {
+		return
+	}
+
+	favorites, err := api.messages.FavoriteMessages(r.Context(), token, service.MessageIDsInput{
+		ConversationID: r.PathValue("conversationId"),
+		MessageIDs:     []string{r.PathValue("messageId")},
+	})
+	if err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, favorites[0])
+}
+
+func (api *API) handleFavoriteMessages(w http.ResponseWriter, r *http.Request) {
+	token := api.requireToken(w, r, api.messages != nil)
+	if token == "" {
+		return
+	}
+
+	var req messageIDsRequest
+	if err := readJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is invalid JSON")
+		return
+	}
+
+	favorites, err := api.messages.FavoriteMessages(r.Context(), token, service.MessageIDsInput{
+		ConversationID: r.PathValue("conversationId"),
+		MessageIDs:     req.MessageIDs,
+	})
+	if err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, messageFavoriteListResponse{Items: favorites})
+}
+
+func (api *API) handleUnfavoriteMessage(w http.ResponseWriter, r *http.Request) {
+	token := api.requireToken(w, r, api.messages != nil)
+	if token == "" {
+		return
+	}
+
+	if err := api.messages.UnfavoriteMessage(r.Context(), token, service.MessageIDsInput{
+		ConversationID: r.PathValue("conversationId"),
+		MessageIDs:     []string{r.PathValue("messageId")},
+	}); err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (api *API) handleListMessageFavorites(w http.ResponseWriter, r *http.Request) {
+	token := api.requireToken(w, r, api.messages != nil)
+	if token == "" {
+		return
+	}
+
+	limit := 50
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		var err error
+		limit, err = parsePositiveInt(rawLimit, 100)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "limit must be between 1 and 100")
+			return
+		}
+	}
+
+	favorites, err := api.messages.ListMessageFavorites(r.Context(), token, service.FavoriteListFilter{Limit: limit})
+	if err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, messageFavoriteListResponse{Items: favorites})
+}
+
 func (api *API) handleMarkConversationRead(w http.ResponseWriter, r *http.Request) {
 	token := api.requireToken(w, r, api.messages != nil)
 	if token == "" {
@@ -296,6 +500,17 @@ func (api *API) handleMarkConversationRead(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *API) publishCreatedMessages(r *http.Request, token string, messages []model.MessageView) {
+	if len(messages) == 0 {
+		return
+	}
+	if conversation, err := api.messages.Conversation(r.Context(), token, messages[0].ConversationID); err == nil {
+		for _, message := range messages {
+			api.publishConversationEvent(conversation, eventMessageCreated, message)
+		}
+	}
 }
 
 func (api *API) requireToken(w http.ResponseWriter, r *http.Request, configured bool) string {

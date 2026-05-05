@@ -19,15 +19,20 @@ type MessageStore interface {
 	IsConversationMember(context.Context, string, string) (bool, error)
 	CreateMessage(context.Context, model.Message) error
 	FindMessageByID(context.Context, string) (model.MessageView, error)
+	FindVisibleMessageByID(context.Context, string, string, string) (model.MessageView, error)
 	EditMessage(context.Context, string, string, string, string, time.Time) (model.MessageView, error)
 	RecallMessage(context.Context, string, string, string, time.Time) (model.MessageView, error)
-	ListMessages(context.Context, string, model.MessageListCursor, time.Time, int) ([]model.MessageView, error)
+	ListMessages(context.Context, string, string, model.MessageListCursor, time.Time, int) ([]model.MessageView, error)
 	ListConversations(context.Context, string, model.ConversationListCursor, time.Time, int, bool) ([]model.ConversationSummary, error)
 	UpdateConversationSettings(context.Context, string, string, model.ConversationSettingsUpdate, time.Time) (model.ConversationSettings, error)
 	CurrentMessageSyncCursor(context.Context) (int64, error)
 	MessageSyncCursorBeforeTime(context.Context, time.Time) (int64, error)
 	ListMessagesSinceCursor(context.Context, string, int64, int64, int) ([]model.MessageSyncEntry, error)
 	MarkConversationRead(context.Context, string, string, string, time.Time) (model.ReadThroughResult, error)
+	DeleteMessagesForUser(context.Context, string, string, []string, time.Time) ([]string, error)
+	FavoriteMessages(context.Context, string, string, []string, time.Time) ([]model.MessageFavorite, error)
+	UnfavoriteMessage(context.Context, string, string) error
+	ListMessageFavorites(context.Context, string, int) ([]model.MessageFavorite, error)
 }
 
 type MessageStickerCatalog interface {
@@ -45,6 +50,7 @@ type MessageInput struct {
 	ConversationID string
 	Type           string
 	Body           string
+	QuoteMessageID string
 }
 
 type MessageListFilter struct {
@@ -93,6 +99,21 @@ type EditInput struct {
 	Body           string
 }
 
+type MessageIDsInput struct {
+	ConversationID string
+	MessageIDs     []string
+}
+
+type ForwardInput struct {
+	SourceConversationID string
+	MessageIDs           []string
+	TargetConversationID string
+}
+
+type FavoriteListFilter struct {
+	Limit int
+}
+
 type ConversationSettingsInput struct {
 	ConversationID string
 	Pinned         *bool
@@ -114,6 +135,8 @@ type messageListCursorPayload struct {
 type syncCursorPayload struct {
 	ChangeID int64 `json:"changeId"`
 }
+
+const maxMessageBatchSize = 50
 
 func NewMessageService(authService *AuthService, messageStore MessageStore) *MessageService {
 	return NewMessageServiceWithStickers(authService, messageStore, NewStickerService())
@@ -155,6 +178,18 @@ func (s *MessageService) SendMessage(ctx context.Context, token string, input Me
 		return model.MessageView{}, ErrInvalidInput
 	}
 
+	quoteMessageID := strings.TrimSpace(input.QuoteMessageID)
+	if quoteMessageID != "" {
+		quotedMessage, err := s.store.FindVisibleMessageByID(ctx, conversationID, actor.ID, quoteMessageID)
+		if err != nil {
+			return model.MessageView{}, mapMessageStoreError(err)
+		}
+		if quotedMessage.RecalledAt != nil {
+			return model.MessageView{}, ErrConflict
+		}
+		quoteMessageID = quotedMessage.ID
+	}
+
 	messageID, err := ids.New()
 	if err != nil {
 		return model.MessageView{}, err
@@ -167,6 +202,7 @@ func (s *MessageService) SendMessage(ctx context.Context, token string, input Me
 		SenderID:       actor.ID,
 		Type:           messageType,
 		Body:           body,
+		QuoteMessageID: quoteMessageID,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -227,7 +263,7 @@ func (s *MessageService) ListMessages(ctx context.Context, token string, filter 
 		return MessageListPage{}, ErrInvalidInput
 	}
 
-	messages, err := s.store.ListMessages(ctx, conversationID, cursor, filter.Before, limit+1)
+	messages, err := s.store.ListMessages(ctx, conversationID, actor.ID, cursor, filter.Before, limit+1)
 	if err != nil {
 		return MessageListPage{}, err
 	}
@@ -604,6 +640,162 @@ func (s *MessageService) RecallMessage(ctx context.Context, token string, input 
 	return message, nil
 }
 
+func (s *MessageService) ForwardMessages(ctx context.Context, token string, input ForwardInput) ([]model.MessageView, error) {
+	actor, err := s.auth.CurrentUser(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+
+	sourceConversationID := strings.TrimSpace(input.SourceConversationID)
+	targetConversationID := strings.TrimSpace(input.TargetConversationID)
+	messageIDs, err := normalizeMessageIDs(input.MessageIDs)
+	if err != nil || sourceConversationID == "" || targetConversationID == "" {
+		return nil, ErrInvalidInput
+	}
+	if err := s.requireConversationMember(ctx, sourceConversationID, actor.ID); err != nil {
+		return nil, err
+	}
+	if err := s.requireConversationMember(ctx, targetConversationID, actor.ID); err != nil {
+		return nil, err
+	}
+
+	now := s.now().UTC()
+	forwarded := make([]model.MessageView, 0, len(messageIDs))
+	for i, messageID := range messageIDs {
+		sourceMessage, err := s.store.FindVisibleMessageByID(ctx, sourceConversationID, actor.ID, messageID)
+		if err != nil {
+			return nil, mapMessageStoreError(err)
+		}
+		if sourceMessage.RecalledAt != nil {
+			return nil, ErrConflict
+		}
+
+		newMessageID, err := ids.New()
+		if err != nil {
+			return nil, err
+		}
+		createdAt := now.Add(time.Duration(i) * time.Millisecond)
+		message := model.Message{
+			ID:             newMessageID,
+			ConversationID: targetConversationID,
+			SenderID:       actor.ID,
+			Type:           sourceMessage.Type,
+			Body:           sourceMessage.Body,
+			CreatedAt:      createdAt,
+			UpdatedAt:      createdAt,
+		}
+		if err := s.store.CreateMessage(ctx, message); err != nil {
+			return nil, mapMessageStoreError(err)
+		}
+
+		created, err := s.store.FindMessageByID(ctx, newMessageID)
+		if err != nil {
+			return nil, mapMessageStoreError(err)
+		}
+		forwarded = append(forwarded, created)
+	}
+
+	return forwarded, nil
+}
+
+func (s *MessageService) DeleteMessagesForMe(ctx context.Context, token string, input MessageIDsInput) ([]string, error) {
+	actor, err := s.auth.CurrentUser(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+
+	conversationID := strings.TrimSpace(input.ConversationID)
+	messageIDs, err := normalizeMessageIDs(input.MessageIDs)
+	if err != nil || conversationID == "" {
+		return nil, ErrInvalidInput
+	}
+	if err := s.requireConversationMember(ctx, conversationID, actor.ID); err != nil {
+		return nil, err
+	}
+
+	deletedIDs, err := s.store.DeleteMessagesForUser(ctx, conversationID, actor.ID, messageIDs, s.now().UTC())
+	if err != nil {
+		return nil, mapMessageStoreError(err)
+	}
+	return deletedIDs, nil
+}
+
+func (s *MessageService) FavoriteMessages(ctx context.Context, token string, input MessageIDsInput) ([]model.MessageFavorite, error) {
+	actor, err := s.auth.CurrentUser(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+
+	conversationID := strings.TrimSpace(input.ConversationID)
+	messageIDs, err := normalizeMessageIDs(input.MessageIDs)
+	if err != nil || conversationID == "" {
+		return nil, ErrInvalidInput
+	}
+	if err := s.requireConversationMember(ctx, conversationID, actor.ID); err != nil {
+		return nil, err
+	}
+	for _, messageID := range messageIDs {
+		message, err := s.store.FindVisibleMessageByID(ctx, conversationID, actor.ID, messageID)
+		if err != nil {
+			return nil, mapMessageStoreError(err)
+		}
+		if message.RecalledAt != nil {
+			return nil, ErrConflict
+		}
+	}
+
+	favorites, err := s.store.FavoriteMessages(ctx, conversationID, actor.ID, messageIDs, s.now().UTC())
+	if err != nil {
+		return nil, mapMessageStoreError(err)
+	}
+	return favorites, nil
+}
+
+func (s *MessageService) UnfavoriteMessage(ctx context.Context, token string, input MessageIDsInput) error {
+	actor, err := s.auth.CurrentUser(ctx, token)
+	if err != nil {
+		return err
+	}
+
+	conversationID := strings.TrimSpace(input.ConversationID)
+	messageIDs, err := normalizeMessageIDs(input.MessageIDs)
+	if err != nil || conversationID == "" || len(messageIDs) != 1 {
+		return ErrInvalidInput
+	}
+	if err := s.requireConversationMember(ctx, conversationID, actor.ID); err != nil {
+		return err
+	}
+	if _, err := s.store.FindVisibleMessageByID(ctx, conversationID, actor.ID, messageIDs[0]); err != nil {
+		return mapMessageStoreError(err)
+	}
+
+	if err := s.store.UnfavoriteMessage(ctx, actor.ID, messageIDs[0]); err != nil {
+		return mapMessageStoreError(err)
+	}
+	return nil
+}
+
+func (s *MessageService) ListMessageFavorites(ctx context.Context, token string, filter FavoriteListFilter) ([]model.MessageFavorite, error) {
+	actor, err := s.auth.CurrentUser(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+
+	if filter.Limit < 0 || filter.Limit > 100 {
+		return nil, ErrInvalidInput
+	}
+	limit := filter.Limit
+	if limit == 0 {
+		limit = 50
+	}
+
+	favorites, err := s.store.ListMessageFavorites(ctx, actor.ID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return favorites, nil
+}
+
 func (s *MessageService) Conversation(ctx context.Context, token, conversationID string) (model.ConversationView, error) {
 	actor, err := s.auth.CurrentUser(ctx, token)
 	if err != nil {
@@ -619,6 +811,30 @@ func (s *MessageService) Conversation(ctx context.Context, token, conversationID
 	}
 
 	return s.store.FindConversationByID(ctx, conversationID)
+}
+
+func normalizeMessageIDs(rawIDs []string) ([]string, error) {
+	if len(rawIDs) == 0 || len(rawIDs) > maxMessageBatchSize {
+		return nil, ErrInvalidInput
+	}
+
+	seen := make(map[string]struct{}, len(rawIDs))
+	messageIDs := make([]string, 0, len(rawIDs))
+	for _, rawID := range rawIDs {
+		messageID := strings.TrimSpace(rawID)
+		if messageID == "" {
+			return nil, ErrInvalidInput
+		}
+		if _, ok := seen[messageID]; ok {
+			continue
+		}
+		seen[messageID] = struct{}{}
+		messageIDs = append(messageIDs, messageID)
+	}
+	if len(messageIDs) == 0 {
+		return nil, ErrInvalidInput
+	}
+	return messageIDs, nil
 }
 
 func (s *MessageService) requireConversationMember(ctx context.Context, conversationID, userID string) error {

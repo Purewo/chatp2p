@@ -38,10 +38,14 @@ func (s *SQLiteUserStore) CreateMessage(ctx context.Context, message model.Messa
 
 	createdAt := message.CreatedAt.UTC().UnixMilli()
 	updatedAt := message.UpdatedAt.UTC().UnixMilli()
+	var quoteMessageID any
+	if message.QuoteMessageID != "" {
+		quoteMessageID = message.QuoteMessageID
+	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO messages (id, conversation_id, sender_id, type, body, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, message.ID, message.ConversationID, message.SenderID, message.Type, message.Body, createdAt, updatedAt); err != nil {
+		INSERT INTO messages (id, conversation_id, sender_id, type, body, quoted_message_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, message.ID, message.ConversationID, message.SenderID, message.Type, message.Body, quoteMessageID, createdAt, updatedAt); err != nil {
 		if isForeignKeyConstraint(err) {
 			return ErrConversationNotFound
 		}
@@ -205,6 +209,32 @@ func (s *SQLiteUserStore) FindMessageByID(ctx context.Context, id string) (model
 	return message, nil
 }
 
+func (s *SQLiteUserStore) FindVisibleMessageByID(ctx context.Context, conversationID, userID, messageID string) (model.MessageView, error) {
+	row := s.db.QueryRowContext(ctx, messageViewSQL()+`
+		WHERE m.id = ?
+		  AND m.conversation_id = ?
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM message_user_states mus
+		    WHERE mus.message_id = m.id
+		      AND mus.user_id = ?
+		      AND mus.deleted_at IS NOT NULL
+		  )
+	`, messageID, conversationID, userID)
+
+	message, err := scanMessageView(row)
+	if err != nil {
+		return model.MessageView{}, err
+	}
+
+	receipts, err := s.loadReadReceipts(ctx, []string{message.ID})
+	if err != nil {
+		return model.MessageView{}, err
+	}
+	message.ReadBy = receipts[message.ID]
+	return message, nil
+}
+
 func recordMessageChange(ctx context.Context, tx *sql.Tx, messageID string, changedAtMillis int64) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO message_changes (message_id, changed_at)
@@ -215,7 +245,7 @@ func recordMessageChange(ctx context.Context, tx *sql.Tx, messageID string, chan
 	return nil
 }
 
-func (s *SQLiteUserStore) ListMessages(ctx context.Context, conversationID string, cursor model.MessageListCursor, before time.Time, limit int) ([]model.MessageView, error) {
+func (s *SQLiteUserStore) ListMessages(ctx context.Context, conversationID, userID string, cursor model.MessageListCursor, before time.Time, limit int) ([]model.MessageView, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -227,12 +257,19 @@ func (s *SQLiteUserStore) ListMessages(ctx context.Context, conversationID strin
 	cursorWhere, cursorArgs := messageListCursorWhere(cursor)
 	args := []any{conversationID, beforeMillis, beforeMillis}
 	args = append(args, cursorArgs...)
-	args = append(args, limit)
+	args = append(args, userID, limit)
 
 	rows, err := s.db.QueryContext(ctx, messageViewSQL()+`
 		WHERE m.conversation_id = ?
 		  AND (? = 0 OR m.created_at < ?)
 		  `+cursorWhere+`
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM message_user_states mus
+		    WHERE mus.message_id = m.id
+		      AND mus.user_id = ?
+		      AND mus.deleted_at IS NOT NULL
+		  )
 		ORDER BY m.created_at DESC, m.id DESC
 		LIMIT ?
 	`, args...)
@@ -329,22 +366,21 @@ func (s *SQLiteUserStore) ListMessagesSinceCursor(ctx context.Context, userID st
 			WHERE cm.user_id = ?
 			  AND mc.id > ?
 			  AND (? = 0 OR mc.id <= ?)
+			  AND NOT EXISTS (
+			    SELECT 1
+			    FROM message_user_states mus
+			    WHERE mus.message_id = src.id
+			      AND mus.user_id = ?
+			      AND mus.deleted_at IS NOT NULL
+			  )
 			GROUP BY mc.message_id
 			ORDER BY change_id ASC
 			LIMIT ?
 		)
-		SELECT m.id, m.conversation_id, m.type, m.body, m.created_at, m.updated_at,
-		       sender.id, sender.username, sender.display_name, sender.avatar_url, sender.bio, sender.created_at, sender.updated_at,
-		       m.edited_at, editor.id, editor.username, editor.display_name, editor.avatar_url, editor.bio, editor.created_at, editor.updated_at,
-		       m.recalled_at, recalled.id, recalled.username, recalled.display_name, recalled.avatar_url, recalled.bio, recalled.created_at, recalled.updated_at,
-		       changed.change_id
-		FROM messages m
-		JOIN users sender ON sender.id = m.sender_id
-		LEFT JOIN users editor ON editor.id = m.edited_by
-		LEFT JOIN users recalled ON recalled.id = m.recalled_by
+	`+messageViewSQLWithExtraSelect("changed.change_id")+`
 		JOIN changed ON changed.message_id = m.id
 		ORDER BY changed.change_id ASC
-	`, userID, afterCursor, beforeCursor, beforeCursor, limit)
+	`, userID, afterCursor, beforeCursor, beforeCursor, userID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list messages since cursor: %w", err)
 	}
@@ -454,7 +490,7 @@ func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, 
 	if err != nil {
 		return nil, err
 	}
-	lastMessages, err := s.loadConversationLastMessages(ctx, conversationIDs)
+	lastMessages, err := s.loadConversationLastMessages(ctx, userID, conversationIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -629,9 +665,16 @@ func (s *SQLiteUserStore) MarkConversationRead(ctx context.Context, conversation
 		WHERE conversation_id = ?
 		  AND created_at <= ?
 		  AND sender_id <> ?
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM message_user_states mus
+		    WHERE mus.message_id = messages.id
+		      AND mus.user_id = ?
+		      AND mus.deleted_at IS NOT NULL
+		  )
 		ON CONFLICT(message_id, user_id) DO UPDATE SET read_at = excluded.read_at
 		WHERE excluded.read_at > read_receipts.read_at
-	`, userID, readAtMillis, conversationID, targetCreatedAt, userID)
+	`, userID, readAtMillis, conversationID, targetCreatedAt, userID, userID)
 	if err != nil {
 		return model.ReadThroughResult{}, fmt.Errorf("mark conversation read: %w", err)
 	}
@@ -640,6 +683,196 @@ func (s *SQLiteUserStore) MarkConversationRead(ctx context.Context, conversation
 		ConversationID:       conversationID,
 		ReadThroughMessageID: messageID,
 		ReadAt:               readAt.UTC(),
+	}, nil
+}
+
+func (s *SQLiteUserStore) DeleteMessagesForUser(ctx context.Context, conversationID, userID string, messageIDs []string, now time.Time) ([]string, error) {
+	if len(messageIDs) == 0 {
+		return []string{}, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	deletedAt := now.UTC().UnixMilli()
+	for _, messageID := range messageIDs {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO message_user_states (message_id, user_id, deleted_at)
+			SELECT m.id, ?, ?
+			FROM messages m
+			WHERE m.id = ?
+			  AND m.conversation_id = ?
+			ON CONFLICT(message_id, user_id) DO UPDATE SET deleted_at = excluded.deleted_at
+		`, userID, deletedAt, messageID, conversationID)
+		if err != nil {
+			return nil, fmt.Errorf("delete message for user: %w", err)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if rowsAffected == 0 {
+			return nil, ErrMessageNotFound
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return append([]string(nil), messageIDs...), nil
+}
+
+func (s *SQLiteUserStore) FavoriteMessages(ctx context.Context, conversationID, userID string, messageIDs []string, now time.Time) ([]model.MessageFavorite, error) {
+	if len(messageIDs) == 0 {
+		return []model.MessageFavorite{}, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	favoritedAt := now.UTC().UnixMilli()
+	for _, messageID := range messageIDs {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO message_user_states (message_id, user_id, favorited_at)
+			SELECT m.id, ?, ?
+			FROM messages m
+			WHERE m.id = ?
+			  AND m.conversation_id = ?
+			ON CONFLICT(message_id, user_id) DO UPDATE SET favorited_at = excluded.favorited_at
+		`, userID, favoritedAt, messageID, conversationID)
+		if err != nil {
+			return nil, fmt.Errorf("favorite message: %w", err)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if rowsAffected == 0 {
+			return nil, ErrMessageNotFound
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	favorites := make([]model.MessageFavorite, 0, len(messageIDs))
+	for _, messageID := range messageIDs {
+		favorite, err := s.loadMessageFavorite(ctx, userID, messageID)
+		if err != nil {
+			return nil, err
+		}
+		favorites = append(favorites, favorite)
+	}
+	return favorites, nil
+}
+
+func (s *SQLiteUserStore) UnfavoriteMessage(ctx context.Context, userID, messageID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE message_user_states
+		SET favorited_at = NULL
+		WHERE message_id = ?
+		  AND user_id = ?
+	`, messageID, userID); err != nil {
+		return fmt.Errorf("unfavorite message: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM message_user_states
+		WHERE message_id = ?
+		  AND user_id = ?
+		  AND favorited_at IS NULL
+		  AND deleted_at IS NULL
+	`, messageID, userID); err != nil {
+		return fmt.Errorf("cleanup message user state: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+func (s *SQLiteUserStore) ListMessageFavorites(ctx context.Context, userID string, limit int) ([]model.MessageFavorite, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	rows, err := s.db.QueryContext(ctx, messageViewSQLWithExtraSelect("mus.favorited_at")+`
+		JOIN message_user_states mus ON mus.message_id = m.id
+		JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = mus.user_id
+		WHERE mus.user_id = ?
+		  AND mus.favorited_at IS NOT NULL
+		  AND mus.deleted_at IS NULL
+		ORDER BY mus.favorited_at DESC, m.created_at DESC, m.id DESC
+		LIMIT ?
+	`, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list message favorites: %w", err)
+	}
+	defer rows.Close()
+
+	var favorites []model.MessageFavorite
+	var messageIDs []string
+	for rows.Next() {
+		var favoritedAt int64
+		message, err := scanMessageViewWithExtras(rows, &favoritedAt)
+		if err != nil {
+			return nil, err
+		}
+		favorites = append(favorites, model.MessageFavorite{
+			Message:     message,
+			FavoritedAt: time.UnixMilli(favoritedAt).UTC(),
+		})
+		messageIDs = append(messageIDs, message.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	receipts, err := s.loadReadReceipts(ctx, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i := range favorites {
+		favorites[i].Message.ReadBy = receipts[favorites[i].Message.ID]
+	}
+
+	return favorites, nil
+}
+
+func (s *SQLiteUserStore) loadMessageFavorite(ctx context.Context, userID, messageID string) (model.MessageFavorite, error) {
+	row := s.db.QueryRowContext(ctx, messageViewSQLWithExtraSelect("mus.favorited_at")+`
+		JOIN message_user_states mus ON mus.message_id = m.id
+		WHERE mus.user_id = ?
+		  AND m.id = ?
+		  AND mus.favorited_at IS NOT NULL
+		  AND mus.deleted_at IS NULL
+	`, userID, messageID)
+
+	var favoritedAt int64
+	message, err := scanMessageViewWithExtras(row, &favoritedAt)
+	if err != nil {
+		return model.MessageFavorite{}, err
+	}
+
+	receipts, err := s.loadReadReceipts(ctx, []string{message.ID})
+	if err != nil {
+		return model.MessageFavorite{}, err
+	}
+	message.ReadBy = receipts[message.ID]
+
+	return model.MessageFavorite{
+		Message:     message,
+		FavoritedAt: time.UnixMilli(favoritedAt).UTC(),
 	}, nil
 }
 
@@ -699,25 +932,40 @@ func (s *SQLiteUserStore) loadConversationMembers(ctx context.Context, conversat
 	return members, nil
 }
 
-func (s *SQLiteUserStore) loadConversationLastMessages(ctx context.Context, conversationIDs []string) (map[string]model.MessageView, error) {
+func (s *SQLiteUserStore) loadConversationLastMessages(ctx context.Context, userID string, conversationIDs []string) (map[string]model.MessageView, error) {
 	lastMessages := make(map[string]model.MessageView, len(conversationIDs))
 	if len(conversationIDs) == 0 {
 		return lastMessages, nil
 	}
 
 	placeholders := make([]string, len(conversationIDs))
-	args := make([]any, len(conversationIDs))
+	args := make([]any, 0, len(conversationIDs)+2)
 	for i, id := range conversationIDs {
 		placeholders[i] = "?"
-		args[i] = id
+		args = append(args, id)
 	}
+	args = append(args, userID, userID)
 
 	rows, err := s.db.QueryContext(ctx, messageViewSQL()+`
 		WHERE m.conversation_id IN (`+strings.Join(placeholders, ",")+`)
 		  AND NOT EXISTS (
 		    SELECT 1
+		    FROM message_user_states hidden
+		    WHERE hidden.message_id = m.id
+		      AND hidden.user_id = ?
+		      AND hidden.deleted_at IS NOT NULL
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1
 		    FROM messages newer
 		    WHERE newer.conversation_id = m.conversation_id
+		      AND NOT EXISTS (
+		        SELECT 1
+		        FROM message_user_states newer_hidden
+		        WHERE newer_hidden.message_id = newer.id
+		          AND newer_hidden.user_id = ?
+		          AND newer_hidden.deleted_at IS NOT NULL
+		      )
 		      AND (
 		        newer.created_at > m.created_at
 		        OR (newer.created_at = m.created_at AND newer.id > m.id)
@@ -762,12 +1010,12 @@ func (s *SQLiteUserStore) loadConversationUnreadCounts(ctx context.Context, user
 	}
 
 	placeholders := make([]string, len(conversationIDs))
-	args := make([]any, 0, len(conversationIDs)+2)
+	args := make([]any, 0, len(conversationIDs)+3)
 	for i, id := range conversationIDs {
 		placeholders[i] = "?"
 		args = append(args, id)
 	}
-	args = append(args, userID, userID)
+	args = append(args, userID, userID, userID)
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.conversation_id, COUNT(*)
@@ -780,6 +1028,13 @@ func (s *SQLiteUserStore) loadConversationUnreadCounts(ctx context.Context, user
 		    FROM read_receipts rr
 		    WHERE rr.message_id = m.id
 		      AND rr.user_id = ?
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM message_user_states mus
+		    WHERE mus.message_id = m.id
+		      AND mus.user_id = ?
+		      AND mus.deleted_at IS NOT NULL
 		  )
 		GROUP BY m.conversation_id
 	`, args...)
@@ -804,15 +1059,27 @@ func (s *SQLiteUserStore) loadConversationUnreadCounts(ctx context.Context, user
 }
 
 func messageViewSQL() string {
+	return messageViewSQLWithExtraSelect("")
+}
+
+func messageViewSQLWithExtraSelect(extraSelect string) string {
+	extra := ""
+	if extraSelect != "" {
+		extra = ", " + extraSelect
+	}
 	return `
 		SELECT m.id, m.conversation_id, m.type, m.body, m.created_at, m.updated_at,
 		       sender.id, sender.username, sender.display_name, sender.avatar_url, sender.bio, sender.created_at, sender.updated_at,
 		       m.edited_at, editor.id, editor.username, editor.display_name, editor.avatar_url, editor.bio, editor.created_at, editor.updated_at,
-		       m.recalled_at, recalled.id, recalled.username, recalled.display_name, recalled.avatar_url, recalled.bio, recalled.created_at, recalled.updated_at
+		       m.recalled_at, recalled.id, recalled.username, recalled.display_name, recalled.avatar_url, recalled.bio, recalled.created_at, recalled.updated_at,
+		       quoted.id, quoted.conversation_id, quoted.type, quoted.body, quoted.created_at, quoted.recalled_at,
+		       quote_sender.id, quote_sender.username, quote_sender.display_name, quote_sender.avatar_url, quote_sender.bio, quote_sender.created_at, quote_sender.updated_at` + extra + `
 		FROM messages m
 		JOIN users sender ON sender.id = m.sender_id
 		LEFT JOIN users editor ON editor.id = m.edited_by
 		LEFT JOIN users recalled ON recalled.id = m.recalled_by
+		LEFT JOIN messages quoted ON quoted.id = m.quoted_message_id
+		LEFT JOIN users quote_sender ON quote_sender.id = quoted.sender_id
 	`
 }
 
@@ -855,6 +1122,19 @@ func scanMessageViewWithExtras(row scanner, extras ...any) (model.MessageView, e
 		recalledBio      sql.NullString
 		recalledCreated  sql.NullInt64
 		recalledUpdated  sql.NullInt64
+		quoteID          sql.NullString
+		quoteConvID      sql.NullString
+		quoteType        sql.NullString
+		quoteBody        sql.NullString
+		quoteCreatedAt   sql.NullInt64
+		quoteRecalledAt  sql.NullInt64
+		quoteSenderID    sql.NullString
+		quoteUsername    sql.NullString
+		quoteName        sql.NullString
+		quoteAvatar      sql.NullString
+		quoteBio         sql.NullString
+		quoteCreated     sql.NullInt64
+		quoteUpdated     sql.NullInt64
 	)
 	scanArgs := []any{
 		&message.ID,
@@ -886,6 +1166,19 @@ func scanMessageViewWithExtras(row scanner, extras ...any) (model.MessageView, e
 		&recalledBio,
 		&recalledCreated,
 		&recalledUpdated,
+		&quoteID,
+		&quoteConvID,
+		&quoteType,
+		&quoteBody,
+		&quoteCreatedAt,
+		&quoteRecalledAt,
+		&quoteSenderID,
+		&quoteUsername,
+		&quoteName,
+		&quoteAvatar,
+		&quoteBio,
+		&quoteCreated,
+		&quoteUpdated,
 	}
 	scanArgs = append(scanArgs, extras...)
 	if err := row.Scan(scanArgs...); err != nil {
@@ -938,6 +1231,35 @@ func scanMessageViewWithExtras(row scanner, extras ...any) (model.MessageView, e
 			profile.UpdatedAt = time.Unix(recalledUpdated.Int64, 0).UTC()
 		}
 		message.RecalledBy = &profile
+	}
+	if quoteID.Valid {
+		quotedMessage := model.QuotedMessage{
+			ID:             quoteID.String,
+			ConversationID: quoteConvID.String,
+			Type:           quoteType.String,
+			Body:           quoteBody.String,
+			Sender: model.Profile{
+				ID:          quoteSenderID.String,
+				Username:    quoteUsername.String,
+				DisplayName: quoteName.String,
+				AvatarURL:   quoteAvatar.String,
+				Bio:         quoteBio.String,
+			},
+		}
+		if quoteCreatedAt.Valid {
+			quotedMessage.CreatedAt = time.UnixMilli(quoteCreatedAt.Int64).UTC()
+		}
+		if quoteRecalledAt.Valid {
+			value := time.UnixMilli(quoteRecalledAt.Int64).UTC()
+			quotedMessage.RecalledAt = &value
+		}
+		if quoteCreated.Valid {
+			quotedMessage.Sender.CreatedAt = time.Unix(quoteCreated.Int64, 0).UTC()
+		}
+		if quoteUpdated.Valid {
+			quotedMessage.Sender.UpdatedAt = time.Unix(quoteUpdated.Int64, 0).UTC()
+		}
+		message.QuotedMessage = &quotedMessage
 	}
 	return message, nil
 }

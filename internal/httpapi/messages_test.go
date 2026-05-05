@@ -111,6 +111,250 @@ func TestMessageFlowSendsListsAndMarksRead(t *testing.T) {
 	}
 }
 
+func TestMessageQuoteReturnsQuotedMessage(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, bob, conversationID := setupDirectConversation(t, router)
+
+	quotedID := sendTextMessage(t, router, alice.AccessToken, conversationID, "quoted body")
+	sendBody, err := json.Marshal(map[string]string{
+		"type":           "text",
+		"body":           "reply body",
+		"quoteMessageId": quotedID,
+	})
+	if err != nil {
+		t.Fatalf("marshal quoted message request: %v", err)
+	}
+
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID+"/messages", bytes.NewReader(sendBody))
+	sendReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	sendReq.Header.Set("Content-Type", "application/json")
+	sendRec := httptest.NewRecorder()
+	router.ServeHTTP(sendRec, sendReq)
+	if sendRec.Code != http.StatusCreated {
+		t.Fatalf("expected quoted send status %d, got %d: %s", http.StatusCreated, sendRec.Code, sendRec.Body.String())
+	}
+
+	var sent struct {
+		Body          string `json:"body"`
+		QuotedMessage *struct {
+			ID     string `json:"id"`
+			Body   string `json:"body"`
+			Sender struct {
+				Username string `json:"username"`
+			} `json:"sender"`
+		} `json:"quotedMessage"`
+	}
+	if err := json.NewDecoder(sendRec.Body).Decode(&sent); err != nil {
+		t.Fatalf("decode quoted message response: %v", err)
+	}
+	if sent.Body != "reply body" || sent.QuotedMessage == nil || sent.QuotedMessage.ID != quotedID || sent.QuotedMessage.Body != "quoted body" || sent.QuotedMessage.Sender.Username != "alice" {
+		t.Fatalf("unexpected quoted message response: %+v", sent)
+	}
+}
+
+func TestDeleteMessageForMeOnlyHidesCurrentUserView(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, bob, conversationID := setupDirectConversation(t, router)
+
+	messageID := sendTextMessage(t, router, alice.AccessToken, conversationID, "delete only for bob")
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/conversations/"+conversationID+"/messages/"+messageID, nil)
+	deleteReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusNoContent {
+		t.Fatalf("expected delete-for-me status %d, got %d: %s", http.StatusNoContent, deleteRec.Code, deleteRec.Body.String())
+	}
+
+	bobList := listMessageIDs(t, router, bob.AccessToken, conversationID)
+	if len(bobList) != 0 {
+		t.Fatalf("expected bob message list to hide deleted message, got %+v", bobList)
+	}
+
+	aliceList := listMessageIDs(t, router, alice.AccessToken, conversationID)
+	if len(aliceList) != 1 || aliceList[0] != messageID {
+		t.Fatalf("expected alice to still see message %q, got %+v", messageID, aliceList)
+	}
+}
+
+func TestMessageFavoritesCanBeAddedListedAndRemoved(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, bob, conversationID := setupDirectConversation(t, router)
+
+	messageID := sendTextMessage(t, router, alice.AccessToken, conversationID, "favorite me")
+
+	favoriteReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID+"/messages/"+messageID+"/favorite", nil)
+	favoriteReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	favoriteRec := httptest.NewRecorder()
+	router.ServeHTTP(favoriteRec, favoriteReq)
+	if favoriteRec.Code != http.StatusOK {
+		t.Fatalf("expected favorite status %d, got %d: %s", http.StatusOK, favoriteRec.Code, favoriteRec.Body.String())
+	}
+
+	var favorite struct {
+		Message struct {
+			ID   string `json:"id"`
+			Body string `json:"body"`
+		} `json:"message"`
+		FavoritedAt string `json:"favoritedAt"`
+	}
+	if err := json.NewDecoder(favoriteRec.Body).Decode(&favorite); err != nil {
+		t.Fatalf("decode favorite response: %v", err)
+	}
+	if favorite.Message.ID != messageID || favorite.Message.Body != "favorite me" || favorite.FavoritedAt == "" {
+		t.Fatalf("unexpected favorite response: %+v", favorite)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/message-favorites?limit=20", nil)
+	listReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list favorites status %d, got %d: %s", http.StatusOK, listRec.Code, listRec.Body.String())
+	}
+
+	var favorites struct {
+		Items []struct {
+			Message struct {
+				ID string `json:"id"`
+			} `json:"message"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(listRec.Body).Decode(&favorites); err != nil {
+		t.Fatalf("decode favorites response: %v", err)
+	}
+	if len(favorites.Items) != 1 || favorites.Items[0].Message.ID != messageID {
+		t.Fatalf("unexpected favorites list: %+v", favorites.Items)
+	}
+
+	unfavoriteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/conversations/"+conversationID+"/messages/"+messageID+"/favorite", nil)
+	unfavoriteReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	unfavoriteRec := httptest.NewRecorder()
+	router.ServeHTTP(unfavoriteRec, unfavoriteReq)
+	if unfavoriteRec.Code != http.StatusNoContent {
+		t.Fatalf("expected unfavorite status %d, got %d: %s", http.StatusNoContent, unfavoriteRec.Code, unfavoriteRec.Body.String())
+	}
+
+	emptyReq := httptest.NewRequest(http.MethodGet, "/api/v1/message-favorites", nil)
+	emptyReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	emptyRec := httptest.NewRecorder()
+	router.ServeHTTP(emptyRec, emptyReq)
+	if emptyRec.Code != http.StatusOK {
+		t.Fatalf("expected empty favorites status %d, got %d: %s", http.StatusOK, emptyRec.Code, emptyRec.Body.String())
+	}
+	var emptyFavorites struct {
+		Items []any `json:"items"`
+	}
+	if err := json.NewDecoder(emptyRec.Body).Decode(&emptyFavorites); err != nil {
+		t.Fatalf("decode empty favorites response: %v", err)
+	}
+	if len(emptyFavorites.Items) != 0 {
+		t.Fatalf("expected favorites to be empty after unfavorite, got %+v", emptyFavorites.Items)
+	}
+}
+
+func TestForwardMessageCopiesContentToTargetConversation(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, _, sourceConversationID := setupDirectConversation(t, router)
+	carol := registerSocialUser(t, router, "carol", "Carol")
+	targetConversationID := createDirectConversationBetween(t, router, alice, carol)
+
+	messageID := sendTextMessage(t, router, alice.AccessToken, sourceConversationID, "forward me")
+	forwardBody, err := json.Marshal(map[string]string{"targetConversationId": targetConversationID})
+	if err != nil {
+		t.Fatalf("marshal forward request: %v", err)
+	}
+
+	forwardReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+sourceConversationID+"/messages/"+messageID+"/forward", bytes.NewReader(forwardBody))
+	forwardReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	forwardReq.Header.Set("Content-Type", "application/json")
+	forwardRec := httptest.NewRecorder()
+	router.ServeHTTP(forwardRec, forwardReq)
+	if forwardRec.Code != http.StatusCreated {
+		t.Fatalf("expected forward status %d, got %d: %s", http.StatusCreated, forwardRec.Code, forwardRec.Body.String())
+	}
+
+	var forwarded struct {
+		ID             string `json:"id"`
+		ConversationID string `json:"conversationId"`
+		Body           string `json:"body"`
+		Sender         struct {
+			Username string `json:"username"`
+		} `json:"sender"`
+	}
+	if err := json.NewDecoder(forwardRec.Body).Decode(&forwarded); err != nil {
+		t.Fatalf("decode forward response: %v", err)
+	}
+	if forwarded.ID == "" || forwarded.ConversationID != targetConversationID || forwarded.Body != "forward me" || forwarded.Sender.Username != "alice" {
+		t.Fatalf("unexpected forward response: %+v", forwarded)
+	}
+
+	targetMessages := listMessageIDs(t, router, carol.AccessToken, targetConversationID)
+	if len(targetMessages) != 1 || targetMessages[0] != forwarded.ID {
+		t.Fatalf("expected target conversation to contain forwarded message, got %+v", targetMessages)
+	}
+}
+
+func TestBatchMessageActionsSupportMultiSelect(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, bob, conversationID := setupDirectConversation(t, router)
+
+	messageIDs := []string{
+		sendTextMessage(t, router, alice.AccessToken, conversationID, "one"),
+		sendTextMessage(t, router, alice.AccessToken, conversationID, "two"),
+		sendTextMessage(t, router, alice.AccessToken, conversationID, "three"),
+	}
+
+	favoriteBody, err := json.Marshal(map[string][]string{"messageIds": messageIDs[:2]})
+	if err != nil {
+		t.Fatalf("marshal batch favorite request: %v", err)
+	}
+	favoriteReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID+"/messages/favorite", bytes.NewReader(favoriteBody))
+	favoriteReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	favoriteReq.Header.Set("Content-Type", "application/json")
+	favoriteRec := httptest.NewRecorder()
+	router.ServeHTTP(favoriteRec, favoriteReq)
+	if favoriteRec.Code != http.StatusOK {
+		t.Fatalf("expected batch favorite status %d, got %d: %s", http.StatusOK, favoriteRec.Code, favoriteRec.Body.String())
+	}
+	var favorites struct {
+		Items []any `json:"items"`
+	}
+	if err := json.NewDecoder(favoriteRec.Body).Decode(&favorites); err != nil {
+		t.Fatalf("decode batch favorite response: %v", err)
+	}
+	if len(favorites.Items) != 2 {
+		t.Fatalf("expected two batch favorites, got %+v", favorites.Items)
+	}
+
+	deleteBody, err := json.Marshal(map[string][]string{"messageIds": messageIDs[:2]})
+	if err != nil {
+		t.Fatalf("marshal batch delete request: %v", err)
+	}
+	deleteReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conversationID+"/messages/delete", bytes.NewReader(deleteBody))
+	deleteReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	deleteReq.Header.Set("Content-Type", "application/json")
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected batch delete status %d, got %d: %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
+	}
+	var deleted struct {
+		DeletedMessageIDs []string `json:"deletedMessageIds"`
+	}
+	if err := json.NewDecoder(deleteRec.Body).Decode(&deleted); err != nil {
+		t.Fatalf("decode batch delete response: %v", err)
+	}
+	if len(deleted.DeletedMessageIDs) != 2 {
+		t.Fatalf("expected two deleted message ids, got %+v", deleted.DeletedMessageIDs)
+	}
+
+	bobMessages := listMessageIDs(t, router, bob.AccessToken, conversationID)
+	if len(bobMessages) != 1 || bobMessages[0] != messageIDs[2] {
+		t.Fatalf("expected bob to see only the non-deleted message, got %+v", bobMessages)
+	}
+}
+
 func TestStickerMessageFlowSendsCatalogSticker(t *testing.T) {
 	router := newSocialTestRouter(t)
 	alice, bob, conversationID := setupDirectConversation(t, router)
@@ -1200,6 +1444,33 @@ func editMessage(t *testing.T, router http.Handler, token, conversationID, messa
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec
+}
+
+func listMessageIDs(t *testing.T, router http.Handler, token, conversationID string) []string {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conversationID+"/messages?limit=50", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected list messages status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var response struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode messages response: %v", err)
+	}
+
+	ids := make([]string, len(response.Items))
+	for i, item := range response.Items {
+		ids[i] = item.ID
+	}
+	return ids
 }
 
 func updateConversationSettings(t *testing.T, router http.Handler, token, conversationID string, body []byte) *httptest.ResponseRecorder {

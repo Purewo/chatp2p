@@ -9,6 +9,13 @@ This document is the practical frontend guide on top of `api/openapi.yaml`.
 
 For browser development on a separate dev server, make sure the backend `CORS_ALLOWED_ORIGINS` environment variable includes the frontend origin, for example `http://localhost:5173`.
 
+## Live Documentation
+
+- OpenAPI contract: `GET /api/v1/docs/openapi.yaml`
+- Recently updated docs: `GET /api/v1/docs/recent?limit=5`
+
+The recent docs endpoint returns Markdown document content directly, ordered by server-side file update time.
+
 ## Authentication
 
 1. Register with `POST /api/v1/auth/register` or login with `POST /api/v1/auth/login`.
@@ -51,6 +58,7 @@ Do not combine `cursor` with the legacy `before` or `since` timestamp parameters
 - `conversationsById`: normalized conversation map
 - `conversationOrder`: ordered IDs from the list API
 - `messagesByConversationId`: normalized thread cache
+- `messageFavorites`: normalized favorited message cache, loaded from `GET /api/v1/message-favorites`
 - `syncCursor`: last processed sync cursor
 - `wsStatus`: `connecting`, `open`, or `closed`
 
@@ -61,9 +69,19 @@ Do not combine `cursor` with the legacy `before` or `since` timestamp parameters
 - Accept friend request: `POST /api/v1/friend-requests/{id}/accept`
 - Open direct chat: `POST /api/v1/conversations/direct`
 - Send message: `POST /api/v1/conversations/{conversationId}/messages`
+- Send quoted reply: `POST /api/v1/conversations/{conversationId}/messages` with `{ "type": "text", "body": "<text>", "quoteMessageId": "<messageId>" }`
 - Send sticker: `POST /api/v1/conversations/{conversationId}/messages` with `{ "type": "sticker", "body": "<stickerId>" }`
+- Forward one message: `POST /api/v1/conversations/{conversationId}/messages/{messageId}/forward`
+- Forward selected messages: `POST /api/v1/conversations/{conversationId}/messages/forward`
+- Favorite one message: `POST /api/v1/conversations/{conversationId}/messages/{messageId}/favorite`
+- Favorite selected messages: `POST /api/v1/conversations/{conversationId}/messages/favorite`
+- List favorites: `GET /api/v1/message-favorites?limit=50`
+- Delete one message for current user: `DELETE /api/v1/conversations/{conversationId}/messages/{messageId}`
+- Delete selected messages for current user: `POST /api/v1/conversations/{conversationId}/messages/delete`
 - Mark read: `POST /api/v1/conversations/{conversationId}/read`
 - Update per-thread settings: `PATCH /api/v1/conversations/{conversationId}/settings`
+
+`DELETE /messages/{messageId}` and batch `/messages/delete` are local delete only: remove the message from the current user's UI state after success, but do not emit a "message recalled" state. Fresh history and conversation-list requests hide locally deleted messages. If the sender wants all members to lose the message, use `POST /messages/{messageId}/recall`.
 
 ## Error Handling
 

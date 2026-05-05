@@ -9,6 +9,8 @@ servers:
 tags:
   - name: System
     description: Service health and operational endpoints
+  - name: Docs
+    description: Live API contract and project documentation endpoints
   - name: Auth
     description: Registration, login, and token issuing
   - name: Users
@@ -37,6 +39,53 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+  /api/v1/docs/openapi.yaml:
+    get:
+      tags:
+        - Docs
+      summary: Get latest OpenAPI document
+      operationId: getOpenAPIDocument
+      description: Returns the current `api/openapi.yaml` file from the running server's repository checkout.
+      responses:
+        "200":
+          description: Latest OpenAPI YAML document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+            text/yaml:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /api/v1/docs/recent:
+    get:
+      tags:
+        - Docs
+      summary: Get recently updated documentation
+      operationId: listRecentDocs
+      description: Returns recently modified Markdown files from `docs/`, including full content for quick frontend display.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 5
+          description: Maximum number of recent docs to return.
+      responses:
+        "200":
+          description: Recently updated documentation files.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecentDocsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /api/v1/ws:
     get:
       tags:
@@ -856,6 +905,135 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  /api/v1/message-favorites:
+    get:
+      tags:
+        - Conversations
+      summary: List favorited messages
+      operationId: listMessageFavorites
+      description: Returns messages favorited by the current user. Messages deleted for the current user are not returned.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Favorited messages ordered by newest favorite first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageFavoriteListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/conversations/{conversationId}/messages/forward:
+    post:
+      tags:
+        - Conversations
+      summary: Forward multiple messages
+      operationId: forwardMessages
+      description: Copies visible, non-recalled source messages into a target conversation. The request order is preserved in the created messages.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForwardMessagesRequest"
+      responses:
+        "201":
+          description: Messages were forwarded into the target conversation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageBatchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/conversations/{conversationId}/messages/favorite:
+    post:
+      tags:
+        - Conversations
+      summary: Favorite multiple messages
+      operationId: favoriteMessages
+      description: Favorites visible, non-recalled messages for the current user. Supports multi-select UI.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageIdsRequest"
+      responses:
+        "200":
+          description: Messages were favorited.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageFavoriteListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/conversations/{conversationId}/messages/delete:
+    post:
+      tags:
+        - Conversations
+      summary: Delete multiple messages for current user
+      operationId: deleteMessagesForMe
+      description: Hides messages only for the current user. This does not recall the message and does not remove it for other conversation members.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageIdsRequest"
+      responses:
+        "200":
+          description: Messages were hidden for the current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteMessagesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v1/conversations/{conversationId}/messages/{messageId}:
     patch:
       tags:
@@ -891,6 +1069,107 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
+    delete:
+      tags:
+        - Conversations
+      summary: Delete a message for current user
+      operationId: deleteMessageForMe
+      description: Hides this message only for the current user. Use recall if the sender needs the message to disappear for everyone.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "204":
+          description: Message was hidden for the current user.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversationId}/messages/{messageId}/forward:
+    post:
+      tags:
+        - Conversations
+      summary: Forward a single message
+      operationId: forwardMessage
+      description: Copies a visible, non-recalled source message into a target conversation.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/MessageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForwardMessageRequest"
+      responses:
+        "201":
+          description: Message was forwarded into the target conversation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/conversations/{conversationId}/messages/{messageId}/favorite:
+    post:
+      tags:
+        - Conversations
+      summary: Favorite a single message
+      operationId: favoriteMessage
+      description: Favorites a visible, non-recalled message for the current user.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "200":
+          description: Message was favorited.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageFavorite"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags:
+        - Conversations
+      summary: Remove a message favorite
+      operationId: unfavoriteMessage
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "204":
+          description: Message favorite was removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v1/conversations/{conversationId}/messages/{messageId}/recall:
     post:
       tags:
@@ -1017,6 +1296,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: The server could not complete the request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
   schemas:
     HealthResponse:
       type: object
@@ -1039,6 +1324,38 @@ components:
           type: string
           format: date-time
           example: "2026-05-04T01:00:00Z"
+    RecentDocsResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecentDoc"
+    RecentDoc:
+      type: object
+      required:
+        - path
+        - title
+        - updatedAt
+        - content
+      properties:
+        path:
+          type: string
+          description: Repository-relative Markdown document path.
+          example: docs/frontend.md
+        title:
+          type: string
+          description: First Markdown H1 in the document, or the filename if no H1 is present.
+          example: Frontend Integration
+        updatedAt:
+          type: string
+          format: date-time
+          description: Last modified timestamp from the server filesystem.
+        content:
+          type: string
+          description: Full Markdown document content.
     RealtimeEvent:
       type: object
       required:
@@ -1602,6 +1919,10 @@ components:
           maxLength: 4000
           description: Text content for `text` messages. Sticker id for `sticker` messages.
           example: hello
+        quoteMessageId:
+          type: string
+          format: uuid
+          description: Optional message id from the same conversation to quote. The quoted message must be visible to the sender and not recalled.
     EditMessageRequest:
       type: object
       required:
@@ -1612,6 +1933,81 @@ components:
           minLength: 1
           maxLength: 4000
           example: updated message text
+    ForwardMessageRequest:
+      type: object
+      required:
+        - targetConversationId
+      properties:
+        targetConversationId:
+          type: string
+          format: uuid
+    ForwardMessagesRequest:
+      type: object
+      required:
+        - messageIds
+        - targetConversationId
+      properties:
+        messageIds:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+        targetConversationId:
+          type: string
+          format: uuid
+    MessageIdsRequest:
+      type: object
+      required:
+        - messageIds
+      properties:
+        messageIds:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+    MessageBatchResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+    DeleteMessagesResponse:
+      type: object
+      required:
+        - deletedMessageIds
+      properties:
+        deletedMessageIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+    MessageFavorite:
+      type: object
+      required:
+        - message
+        - favoritedAt
+      properties:
+        message:
+          $ref: "#/components/schemas/Message"
+        favoritedAt:
+          type: string
+          format: date-time
+    MessageFavoriteListResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MessageFavorite"
     MessageListResponse:
       type: object
       required:
@@ -1652,6 +2048,10 @@ components:
         body:
           type: string
           description: Message text for `text`, sticker id for `sticker`. This is an empty string after the message has been recalled.
+        quotedMessage:
+          description: Message preview quoted by this message. Omitted when the message is not a quote.
+          allOf:
+            - $ref: "#/components/schemas/QuotedMessage"
         readBy:
           type: array
           description: Users who have marked this message as read.
@@ -1677,6 +2077,39 @@ components:
           type: string
           format: date-time
         updatedAt:
+          type: string
+          format: date-time
+    QuotedMessage:
+      type: object
+      required:
+        - id
+        - conversationId
+        - sender
+        - type
+        - body
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        conversationId:
+          type: string
+          format: uuid
+        sender:
+          $ref: "#/components/schemas/UserProfile"
+        type:
+          type: string
+          enum:
+            - text
+            - sticker
+        body:
+          type: string
+          description: Quoted message text or sticker id. Empty when the quoted message has been recalled.
+        recalledAt:
+          type: string
+          format: date-time
+          description: Present when the quoted message has been recalled.
+        createdAt:
           type: string
           format: date-time
     ReadReceipt:
