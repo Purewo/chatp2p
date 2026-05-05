@@ -48,6 +48,10 @@ func (s *SQLiteUserStore) CreateMessage(ctx context.Context, message model.Messa
 		return fmt.Errorf("create message: %w", err)
 	}
 
+	if err := recordMessageChange(ctx, tx, message.ID, updatedAt); err != nil {
+		return err
+	}
+
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE conversations
 		SET updated_at = ?
@@ -97,9 +101,13 @@ func (s *SQLiteUserStore) RecallMessage(ctx context.Context, conversationID, mes
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE messages
 		SET body = '', recalled_at = ?, recalled_by = ?, updated_at = ?
-		WHERE id = ?
+	WHERE id = ?
 	`, nowMillis, actorID, nowMillis, messageID); err != nil {
 		return model.MessageView{}, fmt.Errorf("recall message: %w", err)
+	}
+
+	if err := recordMessageChange(ctx, tx, messageID, nowMillis); err != nil {
+		return model.MessageView{}, err
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -155,9 +163,13 @@ func (s *SQLiteUserStore) EditMessage(ctx context.Context, conversationID, messa
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE messages
 		SET body = ?, edited_at = ?, edited_by = ?, updated_at = ?
-		WHERE id = ?
+	WHERE id = ?
 	`, body, nowMillis, actorID, nowMillis, messageID); err != nil {
 		return model.MessageView{}, fmt.Errorf("edit message: %w", err)
+	}
+
+	if err := recordMessageChange(ctx, tx, messageID, nowMillis); err != nil {
+		return model.MessageView{}, err
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -193,8 +205,18 @@ func (s *SQLiteUserStore) FindMessageByID(ctx context.Context, id string) (model
 	return message, nil
 }
 
-func (s *SQLiteUserStore) ListMessages(ctx context.Context, conversationID string, before time.Time, limit int) ([]model.MessageView, error) {
-	if limit <= 0 || limit > 100 {
+func recordMessageChange(ctx context.Context, tx *sql.Tx, messageID string, changedAtMillis int64) error {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO message_changes (message_id, changed_at)
+		VALUES (?, ?)
+	`, messageID, changedAtMillis); err != nil {
+		return fmt.Errorf("record message change: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteUserStore) ListMessages(ctx context.Context, conversationID string, cursor model.MessageListCursor, before time.Time, limit int) ([]model.MessageView, error) {
+	if limit <= 0 {
 		limit = 50
 	}
 
@@ -202,13 +224,18 @@ func (s *SQLiteUserStore) ListMessages(ctx context.Context, conversationID strin
 	if !before.IsZero() {
 		beforeMillis = before.UTC().UnixMilli()
 	}
+	cursorWhere, cursorArgs := messageListCursorWhere(cursor)
+	args := []any{conversationID, beforeMillis, beforeMillis}
+	args = append(args, cursorArgs...)
+	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, messageViewSQL()+`
 		WHERE m.conversation_id = ?
 		  AND (? = 0 OR m.created_at < ?)
+		  `+cursorWhere+`
 		ORDER BY m.created_at DESC, m.id DESC
 		LIMIT ?
-	`, conversationID, beforeMillis, beforeMillis, limit)
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
@@ -244,39 +271,94 @@ func (s *SQLiteUserStore) ListMessages(ctx context.Context, conversationID strin
 	return messages, nil
 }
 
-func (s *SQLiteUserStore) ListMessagesSince(ctx context.Context, userID string, after, before time.Time, limit int) ([]model.MessageView, error) {
-	if limit <= 0 || limit > 100 {
+func messageListCursorWhere(cursor model.MessageListCursor) (string, []any) {
+	if !cursor.Valid {
+		return "", nil
+	}
+
+	createdAt := cursor.CreatedAt.UTC().UnixMilli()
+	return `
+		  AND (
+		    m.created_at < ?
+		    OR (m.created_at = ? AND m.id < ?)
+		  )`, []any{createdAt, createdAt, cursor.ID}
+}
+
+func (s *SQLiteUserStore) CurrentMessageSyncCursor(ctx context.Context) (int64, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(id), 0)
+		FROM message_changes
+	`)
+
+	var cursor int64
+	if err := row.Scan(&cursor); err != nil {
+		return 0, fmt.Errorf("current message sync cursor: %w", err)
+	}
+	return cursor, nil
+}
+
+func (s *SQLiteUserStore) MessageSyncCursorBeforeTime(ctx context.Context, since time.Time) (int64, error) {
+	if since.IsZero() {
+		return 0, nil
+	}
+
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(id), 0)
+		FROM message_changes
+		WHERE changed_at < ?
+	`, since.UTC().UnixMilli())
+
+	var cursor int64
+	if err := row.Scan(&cursor); err != nil {
+		return 0, fmt.Errorf("message sync cursor before time: %w", err)
+	}
+	return cursor, nil
+}
+
+func (s *SQLiteUserStore) ListMessagesSinceCursor(ctx context.Context, userID string, afterCursor, beforeCursor int64, limit int) ([]model.MessageSyncEntry, error) {
+	if limit <= 0 {
 		limit = 50
 	}
 
-	afterMillis := after.UTC().UnixMilli()
-	beforeMillis := int64(0)
-	if !before.IsZero() {
-		beforeMillis = before.UTC().UnixMilli()
-	}
-
-	rows, err := s.db.QueryContext(ctx, messageViewSQL()+`
-		JOIN conversation_members cm ON cm.conversation_id = m.conversation_id
-		WHERE cm.user_id = ?
-		  AND m.updated_at > ?
-		  AND (? = 0 OR m.updated_at <= ?)
-		ORDER BY m.updated_at ASC, m.id ASC
-		LIMIT ?
-	`, userID, afterMillis, beforeMillis, beforeMillis, limit)
+	rows, err := s.db.QueryContext(ctx, `
+		WITH changed AS (
+			SELECT mc.message_id, MAX(mc.id) AS change_id
+			FROM message_changes mc
+			JOIN messages src ON src.id = mc.message_id
+			JOIN conversation_members cm ON cm.conversation_id = src.conversation_id
+			WHERE cm.user_id = ?
+			  AND mc.id > ?
+			  AND (? = 0 OR mc.id <= ?)
+			GROUP BY mc.message_id
+			ORDER BY change_id ASC
+			LIMIT ?
+		)
+		SELECT m.id, m.conversation_id, m.type, m.body, m.created_at, m.updated_at,
+		       sender.id, sender.username, sender.display_name, sender.avatar_url, sender.bio, sender.created_at, sender.updated_at,
+		       m.edited_at, editor.id, editor.username, editor.display_name, editor.avatar_url, editor.bio, editor.created_at, editor.updated_at,
+		       m.recalled_at, recalled.id, recalled.username, recalled.display_name, recalled.avatar_url, recalled.bio, recalled.created_at, recalled.updated_at,
+		       changed.change_id
+		FROM messages m
+		JOIN users sender ON sender.id = m.sender_id
+		LEFT JOIN users editor ON editor.id = m.edited_by
+		LEFT JOIN users recalled ON recalled.id = m.recalled_by
+		JOIN changed ON changed.message_id = m.id
+		ORDER BY changed.change_id ASC
+	`, userID, afterCursor, beforeCursor, beforeCursor, limit)
 	if err != nil {
-		return nil, fmt.Errorf("list messages since: %w", err)
+		return nil, fmt.Errorf("list messages since cursor: %w", err)
 	}
 	defer rows.Close()
 
-	var messages []model.MessageView
+	var entries []model.MessageSyncEntry
 	var messageIDs []string
 	for rows.Next() {
-		message, err := scanMessageView(rows)
+		entry, err := scanMessageSyncEntry(rows)
 		if err != nil {
 			return nil, err
 		}
-		messages = append(messages, message)
-		messageIDs = append(messageIDs, message.ID)
+		entries = append(entries, entry)
+		messageIDs = append(messageIDs, entry.Message.ID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -286,11 +368,11 @@ func (s *SQLiteUserStore) ListMessagesSince(ctx context.Context, userID string, 
 	if err != nil {
 		return nil, err
 	}
-	for i := range messages {
-		messages[i].ReadBy = receipts[messages[i].ID]
+	for i := range entries {
+		entries[i].Message.ReadBy = receipts[entries[i].Message.ID]
 	}
 
-	return messages, nil
+	return entries, nil
 }
 
 func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, cursor model.ConversationListCursor, before time.Time, limit int, includeArchived bool) ([]model.ConversationSummary, error) {
@@ -735,6 +817,22 @@ func messageViewSQL() string {
 }
 
 func scanMessageView(row scanner) (model.MessageView, error) {
+	return scanMessageViewWithExtras(row)
+}
+
+func scanMessageSyncEntry(row scanner) (model.MessageSyncEntry, error) {
+	var changeID int64
+	message, err := scanMessageViewWithExtras(row, &changeID)
+	if err != nil {
+		return model.MessageSyncEntry{}, err
+	}
+	return model.MessageSyncEntry{
+		ChangeID: changeID,
+		Message:  message,
+	}, nil
+}
+
+func scanMessageViewWithExtras(row scanner, extras ...any) (model.MessageView, error) {
 	var (
 		message          model.MessageView
 		messageCreatedAt int64
@@ -758,7 +856,7 @@ func scanMessageView(row scanner) (model.MessageView, error) {
 		recalledCreated  sql.NullInt64
 		recalledUpdated  sql.NullInt64
 	)
-	if err := row.Scan(
+	scanArgs := []any{
 		&message.ID,
 		&message.ConversationID,
 		&message.Type,
@@ -788,7 +886,9 @@ func scanMessageView(row scanner) (model.MessageView, error) {
 		&recalledBio,
 		&recalledCreated,
 		&recalledUpdated,
-	); err != nil {
+	}
+	scanArgs = append(scanArgs, extras...)
+	if err := row.Scan(scanArgs...); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.MessageView{}, ErrMessageNotFound
 		}

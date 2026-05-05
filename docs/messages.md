@@ -40,7 +40,12 @@ Use `GET /api/v1/conversations/{conversationId}/messages` to load history. The r
 Query parameters:
 
 - `limit`: optional, defaults to 50, maximum 100.
-- `before`: optional RFC3339 timestamp. When present, only older messages are returned.
+- `cursor`: optional opaque pagination cursor from the previous response's `nextCursor`.
+- `before`: optional legacy RFC3339 timestamp. Prefer `cursor` for stable pagination.
+
+The response includes `nextCursor` when older messages are still available. Do not combine `cursor` and `before`.
+
+Cursor pagination uses the same composite order as the history query, including `createdAt` and `id`, so messages with identical timestamps still page consistently.
 
 ## Read Receipts
 

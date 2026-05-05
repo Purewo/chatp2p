@@ -25,7 +25,8 @@ type conversationSettingsRequest struct {
 }
 
 type messageListResponse struct {
-	Items []model.MessageView `json:"items"`
+	Items      []model.MessageView `json:"items"`
+	NextCursor string              `json:"nextCursor,omitempty"`
 }
 
 type conversationListResponse struct {
@@ -43,7 +44,7 @@ func (api *API) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	since, err := parseRequiredTimeQuery(r.URL.Query().Get("since"))
+	since, err := parseTimeQuery(r.URL.Query().Get("since"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "since must be an RFC3339 timestamp")
 		return
@@ -59,8 +60,9 @@ func (api *API) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snapshot, err := api.messages.Sync(r.Context(), token, service.SyncFilter{
-		Since: since,
-		Limit: limit,
+		Since:  since,
+		Cursor: r.URL.Query().Get("cursor"),
+		Limit:  limit,
 	})
 	if err != nil {
 		api.writeServiceError(w, err)
@@ -193,9 +195,10 @@ func (api *API) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	messages, err := api.messages.ListMessages(r.Context(), token, service.MessageListFilter{
+	page, err := api.messages.ListMessages(r.Context(), token, service.MessageListFilter{
 		ConversationID: r.PathValue("conversationId"),
 		Before:         before,
+		Cursor:         r.URL.Query().Get("cursor"),
 		Limit:          limit,
 	})
 	if err != nil {
@@ -203,7 +206,10 @@ func (api *API) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, messageListResponse{Items: messages})
+	writeJSON(w, http.StatusOK, messageListResponse{
+		Items:      page.Items,
+		NextCursor: page.NextCursor,
+	})
 }
 
 func (api *API) handleEditMessage(w http.ResponseWriter, r *http.Request) {
@@ -309,13 +315,6 @@ func (api *API) requireToken(w http.ResponseWriter, r *http.Request, configured 
 func parseTimeQuery(value string) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
-	}
-	return time.Parse(time.RFC3339, value)
-}
-
-func parseRequiredTimeQuery(value string) (time.Time, error) {
-	if value == "" {
-		return time.Time{}, strconv.ErrSyntax
 	}
 	return time.Parse(time.RFC3339, value)
 }

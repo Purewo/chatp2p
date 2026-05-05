@@ -21,10 +21,12 @@ type MessageStore interface {
 	FindMessageByID(context.Context, string) (model.MessageView, error)
 	EditMessage(context.Context, string, string, string, string, time.Time) (model.MessageView, error)
 	RecallMessage(context.Context, string, string, string, time.Time) (model.MessageView, error)
+	ListMessages(context.Context, string, model.MessageListCursor, time.Time, int) ([]model.MessageView, error)
 	ListConversations(context.Context, string, model.ConversationListCursor, time.Time, int, bool) ([]model.ConversationSummary, error)
 	UpdateConversationSettings(context.Context, string, string, model.ConversationSettingsUpdate, time.Time) (model.ConversationSettings, error)
-	ListMessagesSince(context.Context, string, time.Time, time.Time, int) ([]model.MessageView, error)
-	ListMessages(context.Context, string, time.Time, int) ([]model.MessageView, error)
+	CurrentMessageSyncCursor(context.Context) (int64, error)
+	MessageSyncCursorBeforeTime(context.Context, time.Time) (int64, error)
+	ListMessagesSinceCursor(context.Context, string, int64, int64, int) ([]model.MessageSyncEntry, error)
 	MarkConversationRead(context.Context, string, string, string, time.Time) (model.ReadThroughResult, error)
 }
 
@@ -43,7 +45,13 @@ type MessageInput struct {
 type MessageListFilter struct {
 	ConversationID string
 	Before         time.Time
+	Cursor         string
 	Limit          int
+}
+
+type MessageListPage struct {
+	Items      []model.MessageView
+	NextCursor string
 }
 
 type ConversationListFilter struct {
@@ -59,8 +67,9 @@ type ConversationListPage struct {
 }
 
 type SyncFilter struct {
-	Since time.Time
-	Limit int
+	Since  time.Time
+	Cursor string
+	Limit  int
 }
 
 type ReadInput struct {
@@ -90,6 +99,15 @@ type conversationListCursorPayload struct {
 	PinnedAt  *time.Time `json:"pinnedAt,omitempty"`
 	UpdatedAt time.Time  `json:"updatedAt"`
 	ID        string     `json:"id"`
+}
+
+type messageListCursorPayload struct {
+	CreatedAt time.Time `json:"createdAt"`
+	ID        string    `json:"id"`
+}
+
+type syncCursorPayload struct {
+	ChangeID int64 `json:"changeId"`
 }
 
 func NewMessageService(authService *AuthService, messageStore MessageStore) *MessageService {
@@ -150,24 +168,48 @@ func (s *MessageService) SendMessage(ctx context.Context, token string, input Me
 	return s.store.FindMessageByID(ctx, messageID)
 }
 
-func (s *MessageService) ListMessages(ctx context.Context, token string, filter MessageListFilter) ([]model.MessageView, error) {
+func (s *MessageService) ListMessages(ctx context.Context, token string, filter MessageListFilter) (MessageListPage, error) {
 	actor, err := s.auth.CurrentUser(ctx, token)
 	if err != nil {
-		return nil, err
+		return MessageListPage{}, err
 	}
 
 	conversationID := strings.TrimSpace(filter.ConversationID)
 	if conversationID == "" {
-		return nil, ErrInvalidInput
+		return MessageListPage{}, ErrInvalidInput
 	}
-	if filter.Limit < 0 || filter.Limit > 100 {
-		return nil, ErrInvalidInput
+	if filter.Limit < 0 || filter.Limit > 100 || (filter.Cursor != "" && !filter.Before.IsZero()) {
+		return MessageListPage{}, ErrInvalidInput
 	}
 	if err := s.requireConversationMember(ctx, conversationID, actor.ID); err != nil {
-		return nil, err
+		return MessageListPage{}, err
 	}
 
-	return s.store.ListMessages(ctx, conversationID, filter.Before, filter.Limit)
+	limit := filter.Limit
+	if limit == 0 {
+		limit = 50
+	}
+
+	cursor, err := decodeMessageListCursor(filter.Cursor)
+	if err != nil {
+		return MessageListPage{}, ErrInvalidInput
+	}
+
+	messages, err := s.store.ListMessages(ctx, conversationID, cursor, filter.Before, limit+1)
+	if err != nil {
+		return MessageListPage{}, err
+	}
+
+	page := MessageListPage{Items: messages}
+	if len(page.Items) > limit {
+		page.Items = page.Items[len(page.Items)-limit:]
+		nextCursor, err := encodeMessageListCursor(page.Items[0])
+		if err != nil {
+			return MessageListPage{}, err
+		}
+		page.NextCursor = nextCursor
+	}
+	return page, nil
 }
 
 func (s *MessageService) ListConversations(ctx context.Context, token string, filter ConversationListFilter) (ConversationListPage, error) {
@@ -240,6 +282,33 @@ func decodeConversationListCursor(raw string) (model.ConversationListCursor, err
 	return cursor, nil
 }
 
+func decodeMessageListCursor(raw string) (model.MessageListCursor, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return model.MessageListCursor{}, nil
+	}
+
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return model.MessageListCursor{}, err
+	}
+
+	var payload messageListCursorPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return model.MessageListCursor{}, err
+	}
+	payload.ID = strings.TrimSpace(payload.ID)
+	if payload.ID == "" || payload.CreatedAt.IsZero() {
+		return model.MessageListCursor{}, ErrInvalidInput
+	}
+
+	return model.MessageListCursor{
+		Valid:     true,
+		CreatedAt: payload.CreatedAt.UTC(),
+		ID:        payload.ID,
+	}, nil
+}
+
 func encodeConversationListCursor(conversation model.ConversationSummary) (string, error) {
 	payload := conversationListCursorPayload{
 		PinnedAt:  conversation.PinnedAt,
@@ -253,32 +322,119 @@ func encodeConversationListCursor(conversation model.ConversationSummary) (strin
 	return base64.RawURLEncoding.EncodeToString(data), nil
 }
 
+func encodeMessageListCursor(message model.MessageView) (string, error) {
+	payload := messageListCursorPayload{
+		CreatedAt: message.CreatedAt.UTC(),
+		ID:        message.ID,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
+func decodeSyncCursor(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return 0, err
+	}
+
+	var payload syncCursorPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return 0, err
+	}
+	if payload.ChangeID < 0 {
+		return 0, ErrInvalidInput
+	}
+	return payload.ChangeID, nil
+}
+
+func encodeSyncCursor(changeID int64) (string, error) {
+	data, err := json.Marshal(syncCursorPayload{ChangeID: changeID})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
+}
+
 func (s *MessageService) Sync(ctx context.Context, token string, filter SyncFilter) (model.SyncSnapshot, error) {
 	actor, err := s.auth.CurrentUser(ctx, token)
 	if err != nil {
 		return model.SyncSnapshot{}, err
 	}
 
-	if filter.Since.IsZero() || filter.Limit < 0 || filter.Limit > 100 {
+	if filter.Limit < 0 || filter.Limit > 100 || (filter.Cursor != "" && !filter.Since.IsZero()) || (filter.Cursor == "" && filter.Since.IsZero()) {
 		return model.SyncSnapshot{}, ErrInvalidInput
 	}
 
+	limit := filter.Limit
+	if limit == 0 {
+		limit = 50
+	}
+
+	snapshotCursor, err := s.store.CurrentMessageSyncCursor(ctx)
+	if err != nil {
+		return model.SyncSnapshot{}, err
+	}
+
+	afterCursor := int64(0)
+	if filter.Cursor != "" {
+		afterCursor, err = decodeSyncCursor(filter.Cursor)
+		if err != nil {
+			return model.SyncSnapshot{}, ErrInvalidInput
+		}
+		if afterCursor > snapshotCursor {
+			return model.SyncSnapshot{}, ErrInvalidInput
+		}
+	} else {
+		afterCursor, err = s.store.MessageSyncCursorBeforeTime(ctx, filter.Since)
+		if err != nil {
+			return model.SyncSnapshot{}, err
+		}
+	}
+
 	serverTime := s.now().UTC()
-	conversations, err := s.store.ListConversations(ctx, actor.ID, model.ConversationListCursor{}, time.Time{}, filter.Limit, true)
+	conversations, err := s.store.ListConversations(ctx, actor.ID, model.ConversationListCursor{}, time.Time{}, limit, true)
 	if err != nil {
 		return model.SyncSnapshot{}, err
 	}
 
-	messages, err := s.store.ListMessagesSince(ctx, actor.ID, filter.Since, serverTime, filter.Limit)
+	entries, err := s.store.ListMessagesSinceCursor(ctx, actor.ID, afterCursor, snapshotCursor, limit+1)
 	if err != nil {
 		return model.SyncSnapshot{}, err
 	}
 
-	return model.SyncSnapshot{
+	snapshot := model.SyncSnapshot{
 		ServerTime:    serverTime,
 		Conversations: conversations,
-		Messages:      messages,
-	}, nil
+	}
+
+	if len(entries) > limit {
+		snapshot.HasMore = true
+		entries = entries[:limit]
+		snapshot.NextCursor, err = encodeSyncCursor(entries[len(entries)-1].ChangeID)
+		if err != nil {
+			return model.SyncSnapshot{}, err
+		}
+	} else {
+		snapshot.NextCursor, err = encodeSyncCursor(snapshotCursor)
+		if err != nil {
+			return model.SyncSnapshot{}, err
+		}
+	}
+
+	snapshot.Messages = make([]model.MessageView, len(entries))
+	for i := range entries {
+		snapshot.Messages[i] = entries[i].Message
+	}
+
+	return snapshot, nil
 }
 
 func (s *MessageService) ConversationForUser(ctx context.Context, userID, conversationID string) (model.ConversationView, error) {

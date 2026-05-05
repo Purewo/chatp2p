@@ -137,6 +137,12 @@ curl "http://localhost:8080/api/v1/conversations?includeArchived=true" \
 
 curl "http://localhost:8080/api/v1/conversations?limit=20&cursor=<nextCursor>" \
   -H "Authorization: Bearer <bobToken>"
+
+curl "http://localhost:8080/api/v1/conversations/<conversationId>/messages?limit=20&cursor=<nextCursor>" \
+  -H "Authorization: Bearer <bobToken>"
+
+curl "http://localhost:8080/api/v1/sync?cursor=<nextCursor>&limit=50" \
+  -H "Authorization: Bearer <bobToken>"
 ```
 
 ## WebSocket Check

@@ -34,6 +34,17 @@ type MessageView struct {
 	UpdatedAt      time.Time     `json:"updatedAt"`
 }
 
+type MessageListCursor struct {
+	Valid     bool
+	CreatedAt time.Time
+	ID        string
+}
+
+type MessageSyncEntry struct {
+	ChangeID int64
+	Message  MessageView
+}
+
 type ReadThroughResult struct {
 	ConversationID       string    `json:"conversationId"`
 	ReadThroughMessageID string    `json:"readThroughMessageId"`

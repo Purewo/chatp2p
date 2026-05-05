@@ -60,17 +60,24 @@ paths:
         - Sync
       summary: Sync state after reconnect
       operationId: syncState
-      description: Returns the current conversation list and messages created or updated after the supplied cursor. Use `serverTime` from the response as the next `since` value.
+      description: Returns the current conversation list and a page of messages created or updated after the supplied sync cursor. Prefer `cursor` for stable resume and pagination.
       security:
         - bearerAuth: []
       parameters:
         - name: since
           in: query
-          required: true
+          required: false
+          deprecated: true
           schema:
             type: string
             format: date-time
-          description: Last successful sync time, usually the previous response's `serverTime`.
+          description: Legacy sync timestamp. Prefer `cursor` for stable resume. Do not combine with `cursor`.
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque sync cursor returned by the previous response's `nextCursor`. Do not combine with `since`.
         - name: limit
           in: query
           required: false
@@ -79,7 +86,7 @@ paths:
             minimum: 1
             maximum: 100
             default: 50
-          description: Maximum number of conversations and messages returned.
+          description: Maximum number of conversations and changed messages returned on this page.
       responses:
         "200":
           description: Synchronization snapshot.
@@ -754,10 +761,17 @@ paths:
         - name: before
           in: query
           required: false
+          deprecated: true
           schema:
             type: string
             format: date-time
-          description: Returns messages older than this timestamp.
+          description: Legacy timestamp filter for older messages. Prefer `cursor` for stable pagination.
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque pagination cursor returned by the previous list response. Do not combine with `before`.
         - name: limit
           in: query
           required: false
@@ -1019,11 +1033,13 @@ components:
         - serverTime
         - conversations
         - messages
+        - nextCursor
+        - hasMore
       properties:
         serverTime:
           type: string
           format: date-time
-          description: Server-side snapshot time. Store this as the next `since` cursor after processing the response.
+          description: Server-side snapshot time for the response. Legacy clients may reuse this as the next `since` value.
         conversations:
           type: array
           description: Current conversation summaries, including archived conversations and per-user settings.
@@ -1031,9 +1047,15 @@ components:
             $ref: "#/components/schemas/ConversationSummary"
         messages:
           type: array
-          description: Messages created or updated after `since`, ordered oldest to newest by update time.
+          description: Current page of messages created or updated after the supplied sync cursor, ordered oldest to newest by change order.
           items:
             $ref: "#/components/schemas/Message"
+        nextCursor:
+          type: string
+          description: Cursor to store after processing the page. When `hasMore` is true, call sync again immediately with this cursor.
+        hasMore:
+          type: boolean
+          description: True when more changed messages remain in the current sync window.
     RegisterRequest:
       type: object
       required:
@@ -1462,6 +1484,9 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Message"
+        nextCursor:
+          type: string
+          description: Opaque cursor for fetching older messages. Omitted when there are no more results.
     Message:
       type: object
       required:

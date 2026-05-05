@@ -236,6 +236,97 @@ func TestMessageEditUpdatesMessageAndEnforcesSender(t *testing.T) {
 	}
 }
 
+func TestMessageListCursorPaginatesOlderMessages(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, bob, conversationID := setupDirectConversation(t, router)
+
+	messageIDs := []string{
+		sendTextMessage(t, router, alice.AccessToken, conversationID, "one"),
+		sendTextMessage(t, router, bob.AccessToken, conversationID, "two"),
+		sendTextMessage(t, router, alice.AccessToken, conversationID, "three"),
+		sendTextMessage(t, router, bob.AccessToken, conversationID, "four"),
+	}
+
+	seen := map[string]bool{}
+	var ordered []string
+	cursor := ""
+	firstCursor := ""
+	for page := 0; ; page++ {
+		if page > len(messageIDs) {
+			t.Fatalf("message pagination did not terminate, ordered=%+v cursor=%q", ordered, cursor)
+		}
+
+		path := "/api/v1/conversations/" + conversationID + "/messages?limit=1"
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected paged messages status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+		}
+
+		var pageResp struct {
+			Items []struct {
+				ID string `json:"id"`
+			} `json:"items"`
+			NextCursor string `json:"nextCursor"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&pageResp); err != nil {
+			t.Fatalf("decode paged messages: %v", err)
+		}
+		if len(pageResp.Items) != 1 {
+			t.Fatalf("expected one message per page, got %+v", pageResp.Items)
+		}
+
+		messageID := pageResp.Items[0].ID
+		if seen[messageID] {
+			t.Fatalf("duplicate message in cursor pagination: %s ordered=%+v", messageID, ordered)
+		}
+		seen[messageID] = true
+		ordered = append(ordered, messageID)
+		if page == 0 {
+			firstCursor = pageResp.NextCursor
+			if firstCursor == "" {
+				t.Fatal("expected nextCursor on first message page")
+			}
+		}
+		if pageResp.NextCursor == "" {
+			break
+		}
+		cursor = pageResp.NextCursor
+	}
+
+	expected := []string{messageIDs[3], messageIDs[2], messageIDs[1], messageIDs[0]}
+	if len(ordered) != len(expected) {
+		t.Fatalf("expected all messages through cursor pagination, got %+v", ordered)
+	}
+	for i := range expected {
+		if ordered[i] != expected[i] {
+			t.Fatalf("unexpected message order: got %+v want %+v", ordered, expected)
+		}
+	}
+
+	badCursorReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conversationID+"/messages?cursor=not-a-cursor", nil)
+	badCursorReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	badCursorRec := httptest.NewRecorder()
+	router.ServeHTTP(badCursorRec, badCursorReq)
+	if badCursorRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid message cursor status %d, got %d: %s", http.StatusBadRequest, badCursorRec.Code, badCursorRec.Body.String())
+	}
+
+	before := time.Now().UTC().Format(time.RFC3339)
+	combinedReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conversationID+"/messages?before="+url.QueryEscape(before)+"&cursor="+url.QueryEscape(firstCursor), nil)
+	combinedReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	combinedRec := httptest.NewRecorder()
+	router.ServeHTTP(combinedRec, combinedReq)
+	if combinedRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected combined before and message cursor status %d, got %d: %s", http.StatusBadRequest, combinedRec.Code, combinedRec.Body.String())
+	}
+}
+
 func TestConversationListShowsLastMessageAndUnreadCount(t *testing.T) {
 	router := newSocialTestRouter(t)
 	alice, bob, conversationID := setupDirectConversation(t, router)
@@ -812,6 +903,122 @@ func TestSyncReturnsConversationsAndMessagesSinceCursor(t *testing.T) {
 	}
 	if len(recallSyncResp.Messages) != 1 || recallSyncResp.Messages[0].ID != messageID || recallSyncResp.Messages[0].Body != "" || recallSyncResp.Messages[0].RecalledAt == nil {
 		t.Fatalf("unexpected synced recalled messages: %+v", recallSyncResp.Messages)
+	}
+}
+
+func TestSyncCursorPaginatesMessageChanges(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, bob, conversationID := setupDirectConversation(t, router)
+	since := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+
+	messageIDs := []string{
+		sendTextMessage(t, router, alice.AccessToken, conversationID, "sync one"),
+		sendTextMessage(t, router, bob.AccessToken, conversationID, "sync two"),
+		sendTextMessage(t, router, alice.AccessToken, conversationID, "sync three"),
+	}
+
+	type syncPage struct {
+		ServerTime    string `json:"serverTime"`
+		NextCursor    string `json:"nextCursor"`
+		HasMore       bool   `json:"hasMore"`
+		Conversations []struct {
+			ID          string `json:"id"`
+			UnreadCount int    `json:"unreadCount"`
+			LastMessage *struct {
+				ID   string `json:"id"`
+				Body string `json:"body"`
+			} `json:"lastMessage"`
+		} `json:"conversations"`
+		Messages []struct {
+			ID   string `json:"id"`
+			Body string `json:"body"`
+		} `json:"messages"`
+	}
+
+	loadSyncPage := func(path string) syncPage {
+		t.Helper()
+
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected sync page status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+		}
+
+		var page syncPage
+		if err := json.NewDecoder(rec.Body).Decode(&page); err != nil {
+			t.Fatalf("decode sync page: %v", err)
+		}
+		return page
+	}
+
+	first := loadSyncPage("/api/v1/sync?since=" + url.QueryEscape(since) + "&limit=1")
+	if first.ServerTime == "" || first.NextCursor == "" || !first.HasMore {
+		t.Fatalf("expected first sync page to include resume cursor and more pages, got %+v", first)
+	}
+	if len(first.Conversations) != 1 || first.Conversations[0].ID != conversationID {
+		t.Fatalf("unexpected synced conversations on first page: %+v", first.Conversations)
+	}
+	if first.Conversations[0].UnreadCount != 2 {
+		t.Fatalf("expected unread count 2 on first sync page, got %d", first.Conversations[0].UnreadCount)
+	}
+	if first.Conversations[0].LastMessage == nil || first.Conversations[0].LastMessage.ID != messageIDs[2] {
+		t.Fatalf("unexpected synced last message on first page: %+v", first.Conversations[0].LastMessage)
+	}
+
+	var ordered []string
+	page := first
+	for {
+		if len(page.Messages) != 1 {
+			t.Fatalf("expected one changed message per sync page, got %+v", page.Messages)
+		}
+		ordered = append(ordered, page.Messages[0].ID)
+		if !page.HasMore {
+			break
+		}
+		page = loadSyncPage("/api/v1/sync?cursor=" + url.QueryEscape(page.NextCursor) + "&limit=1")
+	}
+
+	if len(ordered) != len(messageIDs) {
+		t.Fatalf("expected all changed messages through sync pagination, got %+v", ordered)
+	}
+	for i := range messageIDs {
+		if ordered[i] != messageIDs[i] {
+			t.Fatalf("unexpected sync message order: got %+v want %+v", ordered, messageIDs)
+		}
+	}
+	if page.NextCursor == "" {
+		t.Fatal("expected final sync page to include resume cursor")
+	}
+
+	editRec := editMessage(t, router, alice.AccessToken, conversationID, messageIDs[0], "sync one edited")
+	if editRec.Code != http.StatusOK {
+		t.Fatalf("expected edit after sync pagination status %d, got %d: %s", http.StatusOK, editRec.Code, editRec.Body.String())
+	}
+
+	resume := loadSyncPage("/api/v1/sync?cursor=" + url.QueryEscape(page.NextCursor) + "&limit=10")
+	if resume.HasMore {
+		t.Fatalf("expected no additional sync pages after resume, got %+v", resume)
+	}
+	if len(resume.Messages) != 1 || resume.Messages[0].ID != messageIDs[0] || resume.Messages[0].Body != "sync one edited" {
+		t.Fatalf("unexpected resumed sync messages: %+v", resume.Messages)
+	}
+
+	badCursorReq := httptest.NewRequest(http.MethodGet, "/api/v1/sync?cursor=not-a-cursor", nil)
+	badCursorReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	badCursorRec := httptest.NewRecorder()
+	router.ServeHTTP(badCursorRec, badCursorReq)
+	if badCursorRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid sync cursor status %d, got %d: %s", http.StatusBadRequest, badCursorRec.Code, badCursorRec.Body.String())
+	}
+
+	combinedReq := httptest.NewRequest(http.MethodGet, "/api/v1/sync?since="+url.QueryEscape(since)+"&cursor="+url.QueryEscape(first.NextCursor), nil)
+	combinedReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	combinedRec := httptest.NewRecorder()
+	router.ServeHTTP(combinedRec, combinedReq)
+	if combinedRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected combined since and cursor sync status %d, got %d: %s", http.StatusBadRequest, combinedRec.Code, combinedRec.Body.String())
 	}
 }
 
