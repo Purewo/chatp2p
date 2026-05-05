@@ -8,6 +8,10 @@ This is a backend-only private chat service. Keep the Go service organized by re
 
 Use `go run ./cmd/server` to start the local API server, usually on `http://127.0.0.1:8080`. Use `go test ./...` to run all unit and integration tests. Run `gofmt -w <files>` before finishing Go edits. If a `Makefile` is added, keep aliases thin, for example `make dev`, `make test`, and `make lint`.
 
+## Network Access
+
+For GitHub and other overseas sites, prefer a temporary per-command proxy instead of direct access when network reliability is an issue. Do not change global Git or system proxy settings for this repository. Use command-scoped settings such as `git -c http.proxy=http://127.0.0.1:10808 -c https.proxy=http://127.0.0.1:10808 fetch` or `push`, and keep the proxy limited to the command that needs it.
+
 ## Coding Style & Naming Conventions
 
 Use short, lowercase package names such as `auth`, `httpapi`, `model`, `service`, `store`, and `storage`. Keep request/response DTOs close to the handler package and shared domain shapes in `internal/model`. Export names only when another package must use them. Prefer clear domain names like `Conversation`, `Message`, `FriendRequest`, and `ReadReceipt`.

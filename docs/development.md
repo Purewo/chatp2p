@@ -33,6 +33,19 @@ HTTP_ADDR=:8081 APP_ENV=development LOG_LEVEL=debug go run ./cmd/server
 
 Keep `api/openapi.yaml` synchronized with every frontend-facing REST change. Do not merge API behavior that is not documented for frontend integration.
 
+## GitHub Access
+
+When GitHub or other overseas services are unstable from the local network, prefer a temporary proxy on a single command instead of changing global configuration. For this project, the local proxy endpoint is typically `127.0.0.1:10808`.
+
+Use command-scoped Git proxy settings:
+
+```sh
+git -c http.proxy=http://127.0.0.1:10808 -c https.proxy=http://127.0.0.1:10808 fetch origin
+git -c http.proxy=http://127.0.0.1:10808 -c https.proxy=http://127.0.0.1:10808 push origin main
+```
+
+Do not run `git config --global http.proxy ...`, `git config --global https.proxy ...`, or change the system-wide proxy just for this repository.
+
 ## Local Authentication Flow
 
 ```sh
