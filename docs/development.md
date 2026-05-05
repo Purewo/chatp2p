@@ -71,6 +71,26 @@ curl -X POST http://localhost:8080/api/v1/friend-requests/<requestId>/accept \
   -H "Authorization: Bearer <bobToken>"
 ```
 
+Either user can remove the friendship later:
+
+```sh
+curl -X DELETE http://localhost:8080/api/v1/friends/<bobUserId> \
+  -H "Authorization: Bearer <aliceToken>"
+```
+
+Users can also block and unblock accounts:
+
+```sh
+curl -X POST http://localhost:8080/api/v1/blocks/<bobUserId> \
+  -H "Authorization: Bearer <aliceToken>"
+
+curl http://localhost:8080/api/v1/blocks \
+  -H "Authorization: Bearer <aliceToken>"
+
+curl -X DELETE http://localhost:8080/api/v1/blocks/<bobUserId> \
+  -H "Authorization: Bearer <aliceToken>"
+```
+
 ## Local Message Flow
 
 Use the `conversation.id` returned from accepting a friend request:
@@ -93,6 +113,14 @@ curl -X POST http://localhost:8080/api/v1/conversations/<conversationId>/read \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <bobToken>" \
   -d "{\"messageId\":\"<messageId>\"}"
+
+curl -X PATCH http://localhost:8080/api/v1/conversations/<conversationId>/settings \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <bobToken>" \
+  -d "{\"pinned\":true,\"mutedUntil\":\"2030-01-01T12:00:00Z\",\"archived\":true}"
+
+curl "http://localhost:8080/api/v1/conversations?includeArchived=true" \
+  -H "Authorization: Bearer <bobToken>"
 ```
 
 ## WebSocket Check

@@ -25,6 +25,10 @@ type friendListResponse struct {
 	Items []model.Friend `json:"items"`
 }
 
+type blockedUserListResponse struct {
+	Items []model.BlockedUser `json:"items"`
+}
+
 type directConversationRequest struct {
 	TargetUserID string `json:"targetUserId"`
 }
@@ -144,6 +148,64 @@ func (api *API) handleListFriends(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, friendListResponse{Items: friends})
+}
+
+func (api *API) handleRemoveFriend(w http.ResponseWriter, r *http.Request) {
+	token := api.socialToken(w, r)
+	if token == "" {
+		return
+	}
+
+	if err := api.social.RemoveFriend(r.Context(), token, r.PathValue("userId")); err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (api *API) handleListBlockedUsers(w http.ResponseWriter, r *http.Request) {
+	token := api.socialToken(w, r)
+	if token == "" {
+		return
+	}
+
+	blocked, err := api.social.ListBlockedUsers(r.Context(), token)
+	if err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, blockedUserListResponse{Items: blocked})
+}
+
+func (api *API) handleBlockUser(w http.ResponseWriter, r *http.Request) {
+	token := api.socialToken(w, r)
+	if token == "" {
+		return
+	}
+
+	blocked, err := api.social.BlockUser(r.Context(), token, r.PathValue("userId"))
+	if err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, blocked)
+}
+
+func (api *API) handleUnblockUser(w http.ResponseWriter, r *http.Request) {
+	token := api.socialToken(w, r)
+	if token == "" {
+		return
+	}
+
+	if err := api.social.UnblockUser(r.Context(), token, r.PathValue("userId")); err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (api *API) handleCreateDirectConversation(w http.ResponseWriter, r *http.Request) {

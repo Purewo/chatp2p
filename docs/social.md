@@ -19,6 +19,18 @@ Only the addressee can accept or decline a request. The service rejects self-req
 
 Use `GET /api/v1/friends` to list accepted friends. Each item contains the friend's public profile and `friendSince`.
 
+Use `DELETE /api/v1/friends/{userId}` to remove an accepted friend. Removing a friend deletes the relationship for both users and clears prior friend-request state between them so either user can send a new request later.
+
+## Blocks
+
+Use `GET /api/v1/blocks` to list users blocked by the current user.
+
+Use `POST /api/v1/blocks/{userId}` to block a user. Blocking removes any friendship and friend-request state between the two users, hides both users from each other's search results, and prevents new friend requests or direct conversation entry while the block exists.
+
+Use `DELETE /api/v1/blocks/{userId}` to unblock a user. Unblocking does not recreate a friendship; either user must send a new friend request.
+
 ## Direct Conversations
 
 Accepting a friend request also creates or returns a one-to-one conversation. Clients can also call `POST /api/v1/conversations/direct` with a friend's `targetUserId` to get the same direct conversation later. Direct conversations require an accepted friendship.
+
+Removing or blocking a friend does not delete existing direct conversations or message history. Existing conversation members can still load prior history, but creating or re-opening a direct conversation through `POST /api/v1/conversations/direct` requires the users to become friends again and have no active block between them.

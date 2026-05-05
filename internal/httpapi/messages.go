@@ -18,6 +18,12 @@ type editMessageRequest struct {
 	Body string `json:"body"`
 }
 
+type conversationSettingsRequest struct {
+	Pinned     *bool   `json:"pinned"`
+	MutedUntil *string `json:"mutedUntil"`
+	Archived   *bool   `json:"archived"`
+}
+
 type messageListResponse struct {
 	Items []model.MessageView `json:"items"`
 }
@@ -84,9 +90,19 @@ func (api *API) handleListConversations(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	includeArchived := false
+	if rawIncludeArchived := r.URL.Query().Get("includeArchived"); rawIncludeArchived != "" {
+		includeArchived, err = strconv.ParseBool(rawIncludeArchived)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "includeArchived must be a boolean")
+			return
+		}
+	}
+
 	conversations, err := api.messages.ListConversations(r.Context(), token, service.ConversationListFilter{
-		Before: before,
-		Limit:  limit,
+		Before:          before,
+		Limit:           limit,
+		IncludeArchived: includeArchived,
 	})
 	if err != nil {
 		api.writeServiceError(w, err)
@@ -94,6 +110,32 @@ func (api *API) handleListConversations(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, conversationListResponse{Items: conversations})
+}
+
+func (api *API) handleUpdateConversationSettings(w http.ResponseWriter, r *http.Request) {
+	token := api.requireToken(w, r, api.messages != nil)
+	if token == "" {
+		return
+	}
+
+	var req conversationSettingsRequest
+	if err := readJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body is invalid JSON")
+		return
+	}
+
+	settings, err := api.messages.UpdateConversationSettings(r.Context(), token, service.ConversationSettingsInput{
+		ConversationID: r.PathValue("conversationId"),
+		Pinned:         req.Pinned,
+		MutedUntil:     req.MutedUntil,
+		Archived:       req.Archived,
+	})
+	if err != nil {
+		api.writeServiceError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, settings)
 }
 
 func (api *API) handleSendMessage(w http.ResponseWriter, r *http.Request) {

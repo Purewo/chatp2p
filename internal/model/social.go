@@ -35,6 +35,11 @@ type Friend struct {
 	FriendSince time.Time `json:"friendSince"`
 }
 
+type BlockedUser struct {
+	User      Profile   `json:"user"`
+	BlockedAt time.Time `json:"blockedAt"`
+}
+
 type Conversation struct {
 	ID        string
 	Type      string
@@ -62,6 +67,23 @@ type ConversationSummary struct {
 	Members     []Profile    `json:"members"`
 	LastMessage *MessageView `json:"lastMessage"`
 	UnreadCount int          `json:"unreadCount"`
+	PinnedAt    *time.Time   `json:"pinnedAt,omitempty"`
+	MutedUntil  *time.Time   `json:"mutedUntil,omitempty"`
+	ArchivedAt  *time.Time   `json:"archivedAt,omitempty"`
 	CreatedAt   time.Time    `json:"createdAt"`
 	UpdatedAt   time.Time    `json:"updatedAt"`
+}
+
+type ConversationSettings struct {
+	ConversationID string     `json:"conversationId"`
+	PinnedAt       *time.Time `json:"pinnedAt,omitempty"`
+	MutedUntil     *time.Time `json:"mutedUntil,omitempty"`
+	ArchivedAt     *time.Time `json:"archivedAt,omitempty"`
+}
+
+type ConversationSettingsUpdate struct {
+	Pinned           *bool
+	MutedUntil       *time.Time
+	UpdateMutedUntil bool
+	Archived         *bool
 }

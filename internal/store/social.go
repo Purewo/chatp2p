@@ -22,9 +22,15 @@ func (s *SQLiteUserStore) SearchUsers(ctx context.Context, actorID, query string
 		FROM users
 		WHERE id <> ?
 		  AND (LOWER(username) LIKE ? OR LOWER(display_name) LIKE ?)
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM user_blocks ub
+		    WHERE (ub.blocker_id = ? AND ub.blocked_id = users.id)
+		       OR (ub.blocker_id = users.id AND ub.blocked_id = ?)
+		  )
 		ORDER BY username
 		LIMIT ?
-	`, actorID, pattern, pattern, limit)
+	`, actorID, pattern, pattern, actorID, actorID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search users: %w", err)
 	}
@@ -121,6 +127,25 @@ func (s *SQLiteUserStore) AreFriends(ctx context.Context, userID, friendID strin
 	}
 }
 
+func (s *SQLiteUserStore) HasBlockBetween(ctx context.Context, userID, otherUserID string) (bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT 1
+		FROM user_blocks
+		WHERE (blocker_id = ? AND blocked_id = ?)
+		   OR (blocker_id = ? AND blocked_id = ?)
+	`, userID, otherUserID, otherUserID, userID)
+
+	var one int
+	switch err := row.Scan(&one); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
 func (s *SQLiteUserStore) HasPendingFriendRequestBetween(ctx context.Context, userID, otherUserID string) (bool, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT 1
@@ -153,6 +178,13 @@ func (s *SQLiteUserStore) AcceptFriendRequest(ctx context.Context, requestID, ac
 	}
 	if request.Status != model.FriendRequestPending {
 		return model.FriendRequestView{}, ErrInvalidFriendRequestState
+	}
+	hasBlock, err := s.HasBlockBetween(ctx, request.RequesterID, request.AddresseeID)
+	if err != nil {
+		return model.FriendRequestView{}, err
+	}
+	if hasBlock {
+		return model.FriendRequestView{}, ErrUserBlocked
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -244,6 +276,158 @@ func (s *SQLiteUserStore) ListFriends(ctx context.Context, userID string) ([]mod
 		return nil, err
 	}
 	return friends, nil
+}
+
+func (s *SQLiteUserStore) ListBlockedUsers(ctx context.Context, userID string) ([]model.BlockedUser, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT u.id, u.username, u.display_name, u.avatar_url, u.bio, u.created_at, u.updated_at, ub.created_at
+		FROM user_blocks ub
+		JOIN users u ON u.id = ub.blocked_id
+		WHERE ub.blocker_id = ?
+		ORDER BY ub.created_at DESC, u.username
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list blocked users: %w", err)
+	}
+	defer rows.Close()
+
+	var blocked []model.BlockedUser
+	for rows.Next() {
+		var blockedAt int64
+		profile, err := scanProfileRowsWithExtraTime(rows, &blockedAt)
+		if err != nil {
+			return nil, err
+		}
+		blocked = append(blocked, model.BlockedUser{
+			User:      profile,
+			BlockedAt: time.Unix(blockedAt, 0).UTC(),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return blocked, nil
+}
+
+func (s *SQLiteUserStore) BlockUser(ctx context.Context, blockerID, blockedID string, now time.Time) (model.BlockedUser, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.BlockedUser{}, err
+	}
+	defer tx.Rollback()
+
+	nowUnix := now.UTC().Unix()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO user_blocks (blocker_id, blocked_id, created_at)
+		VALUES (?, ?, ?)
+	`, blockerID, blockedID, nowUnix); err != nil {
+		if isUniqueConstraint(err) {
+			return model.BlockedUser{}, ErrUserBlocked
+		}
+		if isForeignKeyConstraint(err) {
+			return model.BlockedUser{}, ErrUserNotFound
+		}
+		return model.BlockedUser{}, fmt.Errorf("block user: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM friendships
+		WHERE (user_id = ? AND friend_id = ?)
+		   OR (user_id = ? AND friend_id = ?)
+	`, blockerID, blockedID, blockedID, blockerID); err != nil {
+		return model.BlockedUser{}, fmt.Errorf("remove friendship after block: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM friend_requests
+		WHERE (requester_id = ? AND addressee_id = ?)
+		   OR (requester_id = ? AND addressee_id = ?)
+	`, blockerID, blockedID, blockedID, blockerID); err != nil {
+		return model.BlockedUser{}, fmt.Errorf("remove friend requests after block: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return model.BlockedUser{}, err
+	}
+
+	return s.findBlockedUser(ctx, blockerID, blockedID)
+}
+
+func (s *SQLiteUserStore) UnblockUser(ctx context.Context, blockerID, blockedID string) error {
+	result, err := s.db.ExecContext(ctx, `
+		DELETE FROM user_blocks
+		WHERE blocker_id = ? AND blocked_id = ?
+	`, blockerID, blockedID)
+	if err != nil {
+		return fmt.Errorf("unblock user: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrUserBlockNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteUserStore) RemoveFriendship(ctx context.Context, userID, friendID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM friendships
+		WHERE (user_id = ? AND friend_id = ?)
+		   OR (user_id = ? AND friend_id = ?)
+	`, userID, friendID, friendID, userID)
+	if err != nil {
+		return fmt.Errorf("remove friendship: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrFriendshipNotFound
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM friend_requests
+		WHERE (requester_id = ? AND addressee_id = ?)
+		   OR (requester_id = ? AND addressee_id = ?)
+	`, userID, friendID, friendID, userID); err != nil {
+		return fmt.Errorf("remove friendship requests: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+func (s *SQLiteUserStore) findBlockedUser(ctx context.Context, blockerID, blockedID string) (model.BlockedUser, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT u.id, u.username, u.display_name, u.avatar_url, u.bio, u.created_at, u.updated_at, ub.created_at
+		FROM user_blocks ub
+		JOIN users u ON u.id = ub.blocked_id
+		WHERE ub.blocker_id = ? AND ub.blocked_id = ?
+	`, blockerID, blockedID)
+
+	var blockedAt int64
+	profile, err := scanProfileRowsWithExtraTime(row, &blockedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.BlockedUser{}, ErrUserBlockNotFound
+		}
+		return model.BlockedUser{}, err
+	}
+
+	return model.BlockedUser{
+		User:      profile,
+		BlockedAt: time.Unix(blockedAt, 0).UTC(),
+	}, nil
 }
 
 func (s *SQLiteUserStore) GetOrCreateDirectConversation(ctx context.Context, userAID, userBID, createdBy, newConversationID string, now time.Time) (model.ConversationView, error) {
@@ -548,13 +732,13 @@ func scanProfileRows(rows *sql.Rows) (model.Profile, error) {
 	return profile, nil
 }
 
-func scanProfileRowsWithExtraTime(rows *sql.Rows, extra *int64) (model.Profile, error) {
+func scanProfileRowsWithExtraTime(row scanner, extra *int64) (model.Profile, error) {
 	var (
 		profile   model.Profile
 		createdAt int64
 		updatedAt int64
 	)
-	if err := rows.Scan(
+	if err := row.Scan(
 		&profile.ID,
 		&profile.Username,
 		&profile.DisplayName,

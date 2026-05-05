@@ -154,6 +154,194 @@ func TestSocialFlowCreatesFriendshipAndDirectConversation(t *testing.T) {
 	}
 }
 
+func TestRemoveFriendDeletesRelationshipAndPreservesDirectConversation(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, bob, conversationID := setupDirectConversation(t, router)
+	messageID := sendTextMessage(t, router, alice.AccessToken, conversationID, "history remains")
+
+	removeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/friends/"+bob.User.ID, nil)
+	removeReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	removeRec := httptest.NewRecorder()
+	router.ServeHTTP(removeRec, removeReq)
+	if removeRec.Code != http.StatusNoContent {
+		t.Fatalf("expected remove friend status %d, got %d: %s", http.StatusNoContent, removeRec.Code, removeRec.Body.String())
+	}
+
+	repeatReq := httptest.NewRequest(http.MethodDelete, "/api/v1/friends/"+bob.User.ID, nil)
+	repeatReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	repeatRec := httptest.NewRecorder()
+	router.ServeHTTP(repeatRec, repeatReq)
+	if repeatRec.Code != http.StatusNotFound {
+		t.Fatalf("expected repeated remove friend status %d, got %d: %s", http.StatusNotFound, repeatRec.Code, repeatRec.Body.String())
+	}
+
+	assertNoFriends(t, router, alice.AccessToken)
+	assertNoFriends(t, router, bob.AccessToken)
+
+	directBody := []byte(`{"targetUserId":"` + bob.User.ID + `"}`)
+	directReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/direct", bytes.NewReader(directBody))
+	directReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	directReq.Header.Set("Content-Type", "application/json")
+	directRec := httptest.NewRecorder()
+	router.ServeHTTP(directRec, directReq)
+	if directRec.Code != http.StatusForbidden {
+		t.Fatalf("expected direct conversation after unfriend status %d, got %d: %s", http.StatusForbidden, directRec.Code, directRec.Body.String())
+	}
+
+	messagesReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conversationID+"/messages", nil)
+	messagesReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	messagesRec := httptest.NewRecorder()
+	router.ServeHTTP(messagesRec, messagesReq)
+	if messagesRec.Code != http.StatusOK {
+		t.Fatalf("expected existing direct history status %d, got %d: %s", http.StatusOK, messagesRec.Code, messagesRec.Body.String())
+	}
+
+	var messages struct {
+		Items []struct {
+			ID   string `json:"id"`
+			Body string `json:"body"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(messagesRec.Body).Decode(&messages); err != nil {
+		t.Fatalf("decode existing direct history: %v", err)
+	}
+	if len(messages.Items) != 1 || messages.Items[0].ID != messageID || messages.Items[0].Body != "history remains" {
+		t.Fatalf("unexpected existing direct history: %+v", messages.Items)
+	}
+
+	newRequest := sendRequestResponse(t, router, alice.AccessToken, bob.User.ID)
+	if newRequest.Code != http.StatusCreated {
+		t.Fatalf("expected new friend request after removal status %d, got %d: %s", http.StatusCreated, newRequest.Code, newRequest.Body)
+	}
+}
+
+func TestBlockUserRemovesRelationshipAndPreventsNewSocialActions(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, bob, conversationID := setupDirectConversation(t, router)
+	messageID := sendTextMessage(t, router, alice.AccessToken, conversationID, "blocked history remains")
+
+	blockReq := httptest.NewRequest(http.MethodPost, "/api/v1/blocks/"+bob.User.ID, nil)
+	blockReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	blockRec := httptest.NewRecorder()
+	router.ServeHTTP(blockRec, blockReq)
+	if blockRec.Code != http.StatusCreated {
+		t.Fatalf("expected block status %d, got %d: %s", http.StatusCreated, blockRec.Code, blockRec.Body.String())
+	}
+
+	var blocked struct {
+		User struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+		} `json:"user"`
+		BlockedAt string `json:"blockedAt"`
+	}
+	if err := json.NewDecoder(blockRec.Body).Decode(&blocked); err != nil {
+		t.Fatalf("decode block response: %v", err)
+	}
+	if blocked.User.ID != bob.User.ID || blocked.User.Username != "bob" || blocked.BlockedAt == "" {
+		t.Fatalf("unexpected block response: %+v", blocked)
+	}
+
+	duplicateBlock := httptest.NewRequest(http.MethodPost, "/api/v1/blocks/"+bob.User.ID, nil)
+	duplicateBlock.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	duplicateRec := httptest.NewRecorder()
+	router.ServeHTTP(duplicateRec, duplicateBlock)
+	if duplicateRec.Code != http.StatusConflict {
+		t.Fatalf("expected duplicate block status %d, got %d: %s", http.StatusConflict, duplicateRec.Code, duplicateRec.Body.String())
+	}
+
+	assertNoFriends(t, router, alice.AccessToken)
+	assertNoFriends(t, router, bob.AccessToken)
+
+	blocksReq := httptest.NewRequest(http.MethodGet, "/api/v1/blocks", nil)
+	blocksReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	blocksRec := httptest.NewRecorder()
+	router.ServeHTTP(blocksRec, blocksReq)
+	if blocksRec.Code != http.StatusOK {
+		t.Fatalf("expected list blocks status %d, got %d: %s", http.StatusOK, blocksRec.Code, blocksRec.Body.String())
+	}
+
+	var blocks struct {
+		Items []struct {
+			User struct {
+				ID       string `json:"id"`
+				Username string `json:"username"`
+			} `json:"user"`
+			BlockedAt string `json:"blockedAt"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(blocksRec.Body).Decode(&blocks); err != nil {
+		t.Fatalf("decode blocks response: %v", err)
+	}
+	if len(blocks.Items) != 1 || blocks.Items[0].User.ID != bob.User.ID || blocks.Items[0].BlockedAt == "" {
+		t.Fatalf("unexpected blocks response: %+v", blocks.Items)
+	}
+
+	assertSearchDoesNotFindUser(t, router, alice.AccessToken, "bob")
+	assertSearchDoesNotFindUser(t, router, bob.AccessToken, "alice")
+
+	aliceToBob := sendRequestResponse(t, router, alice.AccessToken, bob.User.ID)
+	if aliceToBob.Code != http.StatusForbidden {
+		t.Fatalf("expected blocked requester status %d, got %d: %s", http.StatusForbidden, aliceToBob.Code, aliceToBob.Body)
+	}
+	bobToAlice := sendRequestResponse(t, router, bob.AccessToken, alice.User.ID)
+	if bobToAlice.Code != http.StatusForbidden {
+		t.Fatalf("expected blocked addressee status %d, got %d: %s", http.StatusForbidden, bobToAlice.Code, bobToAlice.Body)
+	}
+
+	directBody := []byte(`{"targetUserId":"` + bob.User.ID + `"}`)
+	directReq := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/direct", bytes.NewReader(directBody))
+	directReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	directReq.Header.Set("Content-Type", "application/json")
+	directRec := httptest.NewRecorder()
+	router.ServeHTTP(directRec, directReq)
+	if directRec.Code != http.StatusForbidden {
+		t.Fatalf("expected direct conversation while blocked status %d, got %d: %s", http.StatusForbidden, directRec.Code, directRec.Body.String())
+	}
+
+	messagesReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conversationID+"/messages", nil)
+	messagesReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	messagesRec := httptest.NewRecorder()
+	router.ServeHTTP(messagesRec, messagesReq)
+	if messagesRec.Code != http.StatusOK {
+		t.Fatalf("expected existing blocked history status %d, got %d: %s", http.StatusOK, messagesRec.Code, messagesRec.Body.String())
+	}
+
+	var messages struct {
+		Items []struct {
+			ID   string `json:"id"`
+			Body string `json:"body"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(messagesRec.Body).Decode(&messages); err != nil {
+		t.Fatalf("decode existing blocked history: %v", err)
+	}
+	if len(messages.Items) != 1 || messages.Items[0].ID != messageID || messages.Items[0].Body != "blocked history remains" {
+		t.Fatalf("unexpected existing blocked history: %+v", messages.Items)
+	}
+
+	unblockReq := httptest.NewRequest(http.MethodDelete, "/api/v1/blocks/"+bob.User.ID, nil)
+	unblockReq.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	unblockRec := httptest.NewRecorder()
+	router.ServeHTTP(unblockRec, unblockReq)
+	if unblockRec.Code != http.StatusNoContent {
+		t.Fatalf("expected unblock status %d, got %d: %s", http.StatusNoContent, unblockRec.Code, unblockRec.Body.String())
+	}
+
+	repeatUnblock := httptest.NewRequest(http.MethodDelete, "/api/v1/blocks/"+bob.User.ID, nil)
+	repeatUnblock.Header.Set("Authorization", "Bearer "+alice.AccessToken)
+	repeatUnblockRec := httptest.NewRecorder()
+	router.ServeHTTP(repeatUnblockRec, repeatUnblock)
+	if repeatUnblockRec.Code != http.StatusNotFound {
+		t.Fatalf("expected repeated unblock status %d, got %d: %s", http.StatusNotFound, repeatUnblockRec.Code, repeatUnblockRec.Body.String())
+	}
+
+	newRequest := sendRequestResponse(t, router, bob.AccessToken, alice.User.ID)
+	if newRequest.Code != http.StatusCreated {
+		t.Fatalf("expected new friend request after unblock status %d, got %d: %s", http.StatusCreated, newRequest.Code, newRequest.Body)
+	}
+}
+
 func TestCreateGroupConversationUsesMembershipForMessages(t *testing.T) {
 	router := newSocialTestRouter(t)
 	alice := registerSocialUser(t, router, "alice", "Alice")
@@ -513,6 +701,52 @@ func sendRequestResponse(t *testing.T, router http.Handler, token, targetID stri
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return recordedResponse{Code: rec.Code, Body: rec.Body.String()}
+}
+
+func assertNoFriends(t *testing.T, router http.Handler, token string) {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/friends", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected friends status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var friends struct {
+		Items []any `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&friends); err != nil {
+		t.Fatalf("decode friends response: %v", err)
+	}
+	if len(friends.Items) != 0 {
+		t.Fatalf("expected no friends, got %+v", friends.Items)
+	}
+}
+
+func assertSearchDoesNotFindUser(t *testing.T, router http.Handler, token, query string) {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users?query="+query, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected search status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var search struct {
+		Items []struct {
+			Username string `json:"username"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&search); err != nil {
+		t.Fatalf("decode search response: %v", err)
+	}
+	if len(search.Items) != 0 {
+		t.Fatalf("expected search for %q to hide blocked user, got %+v", query, search.Items)
+	}
 }
 
 func createAcceptedFriendship(t *testing.T, router http.Handler, requester, addressee socialSession) {

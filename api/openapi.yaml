@@ -349,6 +349,87 @@ paths:
                 $ref: "#/components/schemas/FriendListResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /api/v1/friends/{userId}:
+    delete:
+      tags:
+        - Friends
+      summary: Remove a friend
+      operationId: removeFriend
+      description: Removes the accepted friendship between the current user and the target user. Existing conversations and messages are not deleted.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204":
+          description: Friendship was removed.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/blocks:
+    get:
+      tags:
+        - Friends
+      summary: List blocked users
+      operationId: listBlockedUsers
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Users blocked by the current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlockedUserListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/blocks/{userId}:
+    post:
+      tags:
+        - Friends
+      summary: Block a user
+      operationId: blockUser
+      description: Blocks the target user, removes any friendship and friend-request state between the two users, and prevents new friend requests or direct conversation entry. Existing conversations and messages are not deleted.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "201":
+          description: User was blocked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlockedUser"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags:
+        - Friends
+      summary: Unblock a user
+      operationId: unblockUser
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204":
+          description: User was unblocked.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /api/v1/conversations:
     get:
       tags:
@@ -373,6 +454,13 @@ paths:
             minimum: 1
             maximum: 100
             default: 50
+        - name: includeArchived
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include conversations archived by the current user. Archived conversations are hidden by default.
       responses:
         "200":
           description: Conversations ordered by latest activity first.
@@ -465,6 +553,38 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Conversation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/conversations/{conversationId}/settings:
+    patch:
+      tags:
+        - Conversations
+      summary: Update current user's conversation settings
+      operationId: updateConversationSettings
+      description: Updates per-user settings for an existing conversation membership. Send an empty `mutedUntil` string to clear mute.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationSettingsUpdateRequest"
+      responses:
+        "200":
+          description: Updated conversation settings for the current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConversationSettings"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -899,7 +1019,7 @@ components:
           description: Server-side snapshot time. Store this as the next `since` cursor after processing the response.
         conversations:
           type: array
-          description: Current conversation summaries for the chat home view.
+          description: Current conversation summaries, including archived conversations and per-user settings.
           items:
             $ref: "#/components/schemas/ConversationSummary"
         messages:
@@ -1081,6 +1201,26 @@ components:
         friendSince:
           type: string
           format: date-time
+    BlockedUserListResponse:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/BlockedUser"
+    BlockedUser:
+      type: object
+      required:
+        - user
+        - blockedAt
+      properties:
+        user:
+          $ref: "#/components/schemas/UserProfile"
+        blockedAt:
+          type: string
+          format: date-time
     DirectConversationRequest:
       type: object
       required:
@@ -1142,6 +1282,40 @@ components:
           items:
             type: string
             format: uuid
+    ConversationSettingsUpdateRequest:
+      type: object
+      description: At least one property must be provided. `mutedUntil` must be a future RFC3339 timestamp, or an empty string to clear mute.
+      properties:
+        pinned:
+          type: boolean
+          description: Set to true to pin the conversation, or false to clear the pin.
+        mutedUntil:
+          type: string
+          description: Future RFC3339 timestamp for mute expiry. Send an empty string to clear mute.
+          example: "2030-01-01T12:00:00Z"
+        archived:
+          type: boolean
+          description: Set to true to hide the conversation from the default list, or false to restore it.
+    ConversationSettings:
+      type: object
+      required:
+        - conversationId
+      properties:
+        conversationId:
+          type: string
+          format: uuid
+        pinnedAt:
+          type: string
+          format: date-time
+          description: Present when the current user has pinned the conversation.
+        mutedUntil:
+          type: string
+          format: date-time
+          description: Present when the current user has muted the conversation.
+        archivedAt:
+          type: string
+          format: date-time
+          description: Present when the current user has archived the conversation.
     ConversationListResponse:
       type: object
       required:
@@ -1191,6 +1365,18 @@ components:
           type: integer
           minimum: 0
           description: Count of messages from other members that the current user has not marked read.
+        pinnedAt:
+          type: string
+          format: date-time
+          description: Present when the current user has pinned the conversation.
+        mutedUntil:
+          type: string
+          format: date-time
+          description: Present when the current user has muted the conversation.
+        archivedAt:
+          type: string
+          format: date-time
+          description: Present when the current user has archived the conversation.
         createdAt:
           type: string
           format: date-time

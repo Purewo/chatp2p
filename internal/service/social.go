@@ -20,9 +20,14 @@ type SocialStore interface {
 	ListFriendRequests(context.Context, string, string, string) ([]model.FriendRequestView, error)
 	HasPendingFriendRequestBetween(context.Context, string, string) (bool, error)
 	AreFriends(context.Context, string, string) (bool, error)
+	HasBlockBetween(context.Context, string, string) (bool, error)
 	AcceptFriendRequest(context.Context, string, string, time.Time) (model.FriendRequestView, error)
 	DeclineFriendRequest(context.Context, string, string, time.Time) (model.FriendRequestView, error)
 	ListFriends(context.Context, string) ([]model.Friend, error)
+	RemoveFriendship(context.Context, string, string) error
+	ListBlockedUsers(context.Context, string) ([]model.BlockedUser, error)
+	BlockUser(context.Context, string, string, time.Time) (model.BlockedUser, error)
+	UnblockUser(context.Context, string, string) error
 	FindConversationByID(context.Context, string) (model.ConversationView, error)
 	IsConversationMember(context.Context, string, string) (bool, error)
 	GetOrCreateDirectConversation(context.Context, string, string, string, string, time.Time) (model.ConversationView, error)
@@ -128,6 +133,13 @@ func (s *SocialService) SendFriendRequest(ctx context.Context, token string, inp
 	}
 	if areFriends {
 		return model.FriendRequestView{}, ErrConflict
+	}
+	hasBlock, err := s.store.HasBlockBetween(ctx, actor.ID, targetUserID)
+	if err != nil {
+		return model.FriendRequestView{}, err
+	}
+	if hasBlock {
+		return model.FriendRequestView{}, ErrForbidden
 	}
 	hasPendingRequest, err := s.store.HasPendingFriendRequestBetween(ctx, actor.ID, targetUserID)
 	if err != nil {
@@ -255,6 +267,92 @@ func (s *SocialService) ListFriendsForUser(ctx context.Context, userID string) (
 	return s.store.ListFriends(ctx, userID)
 }
 
+func (s *SocialService) ListBlockedUsers(ctx context.Context, token string) ([]model.BlockedUser, error) {
+	actor, err := s.auth.CurrentUser(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.ListBlockedUsers(ctx, actor.ID)
+}
+
+func (s *SocialService) BlockUser(ctx context.Context, token, blockedID string) (model.BlockedUser, error) {
+	actor, err := s.auth.CurrentUser(ctx, token)
+	if err != nil {
+		return model.BlockedUser{}, err
+	}
+
+	blockedID = strings.TrimSpace(blockedID)
+	if blockedID == "" || blockedID == actor.ID {
+		return model.BlockedUser{}, ErrInvalidInput
+	}
+	if _, err := s.store.FindByID(ctx, blockedID); err != nil {
+		if errors.Is(err, store.ErrUserNotFound) {
+			return model.BlockedUser{}, ErrNotFound
+		}
+		return model.BlockedUser{}, err
+	}
+
+	blocked, err := s.store.BlockUser(ctx, actor.ID, blockedID, s.now().UTC())
+	if err != nil {
+		return model.BlockedUser{}, mapSocialStoreError(err)
+	}
+	return blocked, nil
+}
+
+func (s *SocialService) UnblockUser(ctx context.Context, token, blockedID string) error {
+	actor, err := s.auth.CurrentUser(ctx, token)
+	if err != nil {
+		return err
+	}
+
+	blockedID = strings.TrimSpace(blockedID)
+	if blockedID == "" || blockedID == actor.ID {
+		return ErrInvalidInput
+	}
+	if _, err := s.store.FindByID(ctx, blockedID); err != nil {
+		if errors.Is(err, store.ErrUserNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	if err := s.store.UnblockUser(ctx, actor.ID, blockedID); err != nil {
+		return mapSocialStoreError(err)
+	}
+	return nil
+}
+
+func (s *SocialService) RemoveFriend(ctx context.Context, token, friendID string) error {
+	actor, err := s.auth.CurrentUser(ctx, token)
+	if err != nil {
+		return err
+	}
+
+	friendID = strings.TrimSpace(friendID)
+	if friendID == "" || friendID == actor.ID {
+		return ErrInvalidInput
+	}
+	if _, err := s.store.FindByID(ctx, friendID); err != nil {
+		if errors.Is(err, store.ErrUserNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+
+	areFriends, err := s.store.AreFriends(ctx, actor.ID, friendID)
+	if err != nil {
+		return err
+	}
+	if !areFriends {
+		return ErrNotFound
+	}
+
+	if err := s.store.RemoveFriendship(ctx, actor.ID, friendID); err != nil {
+		return mapSocialStoreError(err)
+	}
+	return nil
+}
+
 func (s *SocialService) GetOrCreateDirectConversation(ctx context.Context, token string, input DirectConversationInput) (model.ConversationView, error) {
 	actor, err := s.auth.CurrentUser(ctx, token)
 	if err != nil {
@@ -277,6 +375,13 @@ func (s *SocialService) GetOrCreateDirectConversation(ctx context.Context, token
 		return model.ConversationView{}, err
 	}
 	if !areFriends {
+		return model.ConversationView{}, ErrForbidden
+	}
+	hasBlock, err := s.store.HasBlockBetween(ctx, actor.ID, targetUserID)
+	if err != nil {
+		return model.ConversationView{}, err
+	}
+	if hasBlock {
 		return model.ConversationView{}, ErrForbidden
 	}
 
@@ -319,6 +424,13 @@ func (s *SocialService) CreateGroupConversation(ctx context.Context, token strin
 			return model.ConversationView{}, err
 		}
 		if !areFriends {
+			return model.ConversationView{}, ErrForbidden
+		}
+		hasBlock, err := s.store.HasBlockBetween(ctx, actor.ID, memberID)
+		if err != nil {
+			return model.ConversationView{}, err
+		}
+		if hasBlock {
 			return model.ConversationView{}, ErrForbidden
 		}
 	}
@@ -428,6 +540,13 @@ func (s *SocialService) AddGroupConversationMembers(ctx context.Context, token s
 			return model.ConversationView{}, err
 		}
 		if !areFriends {
+			return model.ConversationView{}, ErrForbidden
+		}
+		hasBlock, err := s.store.HasBlockBetween(ctx, actor.ID, memberID)
+		if err != nil {
+			return model.ConversationView{}, err
+		}
+		if hasBlock {
 			return model.ConversationView{}, ErrForbidden
 		}
 	}
@@ -565,11 +684,11 @@ func normalizeGroupMemberIDs(memberIDs []string, actorID string) ([]string, erro
 
 func mapSocialStoreError(err error) error {
 	switch {
-	case errors.Is(err, store.ErrFriendRequestNotFound), errors.Is(err, store.ErrUserNotFound), errors.Is(err, store.ErrConversationNotFound), errors.Is(err, store.ErrConversationMemberNotFound):
+	case errors.Is(err, store.ErrFriendRequestNotFound), errors.Is(err, store.ErrUserNotFound), errors.Is(err, store.ErrFriendshipNotFound), errors.Is(err, store.ErrUserBlockNotFound), errors.Is(err, store.ErrConversationNotFound), errors.Is(err, store.ErrConversationMemberNotFound):
 		return ErrNotFound
 	case errors.Is(err, store.ErrForbidden):
 		return ErrForbidden
-	case errors.Is(err, store.ErrInvalidFriendRequestState), errors.Is(err, store.ErrFriendRequestExists), errors.Is(err, store.ErrAlreadyFriends), errors.Is(err, store.ErrConversationMemberExists):
+	case errors.Is(err, store.ErrInvalidFriendRequestState), errors.Is(err, store.ErrFriendRequestExists), errors.Is(err, store.ErrAlreadyFriends), errors.Is(err, store.ErrUserBlocked), errors.Is(err, store.ErrConversationMemberExists):
 		return ErrConflict
 	default:
 		return err

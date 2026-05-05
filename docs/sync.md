@@ -21,7 +21,7 @@ Authorization: Bearer <accessToken>
 }
 ```
 
-- `conversations`: current chat home summaries, including `lastMessage` and `unreadCount`.
+- `conversations`: current conversation summaries, including archived conversations, `lastMessage`, `unreadCount`, and per-user settings such as `pinnedAt`, `mutedUntil`, and `archivedAt`.
 - `messages`: messages created or updated after `since`, ordered oldest to newest by update time.
 - `serverTime`: next sync cursor after the response is processed.
 

@@ -293,7 +293,7 @@ func (s *SQLiteUserStore) ListMessagesSince(ctx context.Context, userID string, 
 	return messages, nil
 }
 
-func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, before time.Time, limit int) ([]model.ConversationSummary, error) {
+func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, before time.Time, limit int, includeArchived bool) ([]model.ConversationSummary, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
@@ -302,16 +302,22 @@ func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, 
 	if !before.IsZero() {
 		beforeSeconds = before.UTC().Unix()
 	}
+	includeArchivedValue := 0
+	if includeArchived {
+		includeArchivedValue = 1
+	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT c.id, c.type, c.title, c.created_by, c.created_at, c.updated_at
+		SELECT c.id, c.type, c.title, c.created_by, c.created_at, c.updated_at,
+		       self.pinned_at, self.muted_until, self.archived_at
 		FROM conversations c
 		JOIN conversation_members self ON self.conversation_id = c.id
 		WHERE self.user_id = ?
 		  AND (? = 0 OR c.updated_at < ?)
-		ORDER BY c.updated_at DESC, c.id DESC
+		  AND (? OR self.archived_at IS NULL)
+		ORDER BY (self.pinned_at IS NOT NULL) DESC, self.pinned_at DESC, c.updated_at DESC, c.id DESC
 		LIMIT ?
-	`, userID, beforeSeconds, beforeSeconds, limit)
+	`, userID, beforeSeconds, beforeSeconds, includeArchivedValue, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list conversations: %w", err)
 	}
@@ -324,6 +330,9 @@ func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, 
 			conversation          model.ConversationSummary
 			conversationCreatedAt int64
 			conversationUpdatedAt int64
+			pinnedAt              sql.NullInt64
+			mutedUntil            sql.NullInt64
+			archivedAt            sql.NullInt64
 		)
 		if err := rows.Scan(
 			&conversation.ID,
@@ -332,11 +341,17 @@ func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, 
 			&conversation.CreatedBy,
 			&conversationCreatedAt,
 			&conversationUpdatedAt,
+			&pinnedAt,
+			&mutedUntil,
+			&archivedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan conversation summary: %w", err)
 		}
 		conversation.CreatedAt = time.Unix(conversationCreatedAt, 0).UTC()
 		conversation.UpdatedAt = time.Unix(conversationUpdatedAt, 0).UTC()
+		conversation.PinnedAt = unixSecondsPtr(pinnedAt)
+		conversation.MutedUntil = unixSecondsPtr(mutedUntil)
+		conversation.ArchivedAt = unixSecondsPtr(archivedAt)
 		conversations = append(conversations, conversation)
 		conversationIDs = append(conversationIDs, conversation.ID)
 	}
@@ -374,6 +389,85 @@ func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, 
 	return conversations, nil
 }
 
+func (s *SQLiteUserStore) UpdateConversationSettings(ctx context.Context, conversationID, userID string, update model.ConversationSettingsUpdate, now time.Time) (model.ConversationSettings, error) {
+	setClauses := []string{}
+	args := []any{}
+	nowUnix := now.UTC().Unix()
+
+	if update.Pinned != nil {
+		if *update.Pinned {
+			setClauses = append(setClauses, "pinned_at = ?")
+			args = append(args, nowUnix)
+		} else {
+			setClauses = append(setClauses, "pinned_at = NULL")
+		}
+	}
+	if update.UpdateMutedUntil {
+		if update.MutedUntil != nil {
+			setClauses = append(setClauses, "muted_until = ?")
+			args = append(args, update.MutedUntil.UTC().Unix())
+		} else {
+			setClauses = append(setClauses, "muted_until = NULL")
+		}
+	}
+	if update.Archived != nil {
+		if *update.Archived {
+			setClauses = append(setClauses, "archived_at = ?")
+			args = append(args, nowUnix)
+		} else {
+			setClauses = append(setClauses, "archived_at = NULL")
+		}
+	}
+	if len(setClauses) == 0 {
+		return s.loadConversationSettings(ctx, conversationID, userID)
+	}
+
+	args = append(args, conversationID, userID)
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE conversation_members
+		SET `+strings.Join(setClauses, ", ")+`
+		WHERE conversation_id = ? AND user_id = ?
+	`, args...)
+	if err != nil {
+		return model.ConversationSettings{}, fmt.Errorf("update conversation settings: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return model.ConversationSettings{}, err
+	}
+	if rowsAffected == 0 {
+		return model.ConversationSettings{}, ErrConversationMemberNotFound
+	}
+
+	return s.loadConversationSettings(ctx, conversationID, userID)
+}
+
+func (s *SQLiteUserStore) loadConversationSettings(ctx context.Context, conversationID, userID string) (model.ConversationSettings, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT conversation_id, pinned_at, muted_until, archived_at
+		FROM conversation_members
+		WHERE conversation_id = ? AND user_id = ?
+	`, conversationID, userID)
+
+	var (
+		settings   model.ConversationSettings
+		pinnedAt   sql.NullInt64
+		mutedUntil sql.NullInt64
+		archivedAt sql.NullInt64
+	)
+	if err := row.Scan(&settings.ConversationID, &pinnedAt, &mutedUntil, &archivedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.ConversationSettings{}, ErrConversationMemberNotFound
+		}
+		return model.ConversationSettings{}, fmt.Errorf("load conversation settings: %w", err)
+	}
+	settings.PinnedAt = unixSecondsPtr(pinnedAt)
+	settings.MutedUntil = unixSecondsPtr(mutedUntil)
+	settings.ArchivedAt = unixSecondsPtr(archivedAt)
+	return settings, nil
+}
+
 func conversationSummaryTitle(conversation model.ConversationSummary, userID string) string {
 	if conversation.Title != "" || conversation.Type != model.ConversationDirect {
 		return conversation.Title
@@ -387,6 +481,14 @@ func conversationSummaryTitle(conversation model.ConversationSummary, userID str
 		}
 	}
 	return conversation.Title
+}
+
+func unixSecondsPtr(value sql.NullInt64) *time.Time {
+	if !value.Valid {
+		return nil
+	}
+	t := time.Unix(value.Int64, 0).UTC()
+	return &t
 }
 
 func (s *SQLiteUserStore) MarkConversationRead(ctx context.Context, conversationID, userID, messageID string, readAt time.Time) (model.ReadThroughResult, error) {

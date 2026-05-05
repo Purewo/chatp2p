@@ -330,6 +330,205 @@ func TestConversationListShowsLastMessageAndUnreadCount(t *testing.T) {
 	}
 }
 
+func TestConversationSettingsUpdatePinsArchivesAndFiltersList(t *testing.T) {
+	router := newSocialTestRouter(t)
+	alice, bob, conversationID := setupDirectConversation(t, router)
+
+	carol := registerSocialUser(t, router, "carol", "Carol")
+	requestResp := sendRequestResponse(t, router, bob.AccessToken, carol.User.ID)
+	if requestResp.Code != http.StatusCreated {
+		t.Fatalf("expected friend request to carol status %d, got %d: %s", http.StatusCreated, requestResp.Code, requestResp.Body)
+	}
+
+	var friendRequest struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(requestResp.Body), &friendRequest); err != nil {
+		t.Fatalf("decode carol friend request: %v", err)
+	}
+
+	acceptReq := httptest.NewRequest(http.MethodPost, "/api/v1/friend-requests/"+friendRequest.ID+"/accept", nil)
+	acceptReq.Header.Set("Authorization", "Bearer "+carol.AccessToken)
+	acceptRec := httptest.NewRecorder()
+	router.ServeHTTP(acceptRec, acceptReq)
+	if acceptRec.Code != http.StatusOK {
+		t.Fatalf("expected carol accept status %d, got %d: %s", http.StatusOK, acceptRec.Code, acceptRec.Body.String())
+	}
+
+	var accepted struct {
+		Conversation struct {
+			ID string `json:"id"`
+		} `json:"conversation"`
+	}
+	if err := json.NewDecoder(acceptRec.Body).Decode(&accepted); err != nil {
+		t.Fatalf("decode carol accept response: %v", err)
+	}
+	secondConversationID := accepted.Conversation.ID
+	if secondConversationID == "" {
+		t.Fatal("expected second conversation id")
+	}
+
+	sendTextMessage(t, router, alice.AccessToken, conversationID, "make alice conversation newer")
+
+	beforePinReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=10", nil)
+	beforePinReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	beforePinRec := httptest.NewRecorder()
+	router.ServeHTTP(beforePinRec, beforePinReq)
+	if beforePinRec.Code != http.StatusOK {
+		t.Fatalf("expected conversation list before pin status %d, got %d: %s", http.StatusOK, beforePinRec.Code, beforePinRec.Body.String())
+	}
+
+	var beforePin struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(beforePinRec.Body).Decode(&beforePin); err != nil {
+		t.Fatalf("decode conversation list before pin: %v", err)
+	}
+	if len(beforePin.Items) != 2 {
+		t.Fatalf("expected two conversations before pin, got %+v", beforePin.Items)
+	}
+
+	futureMutedUntil := time.Now().UTC().Add(time.Hour).Truncate(time.Second).Format(time.RFC3339)
+	settingsRec := updateConversationSettings(t, router, bob.AccessToken, secondConversationID, []byte(`{"pinned":true,"mutedUntil":"`+futureMutedUntil+`","archived":true}`))
+	if settingsRec.Code != http.StatusOK {
+		t.Fatalf("expected settings update status %d, got %d: %s", http.StatusOK, settingsRec.Code, settingsRec.Body.String())
+	}
+
+	var settings struct {
+		ConversationID string     `json:"conversationId"`
+		PinnedAt       *time.Time `json:"pinnedAt"`
+		MutedUntil     *time.Time `json:"mutedUntil"`
+		ArchivedAt     *time.Time `json:"archivedAt"`
+	}
+	if err := json.NewDecoder(settingsRec.Body).Decode(&settings); err != nil {
+		t.Fatalf("decode settings response: %v", err)
+	}
+	if settings.ConversationID != secondConversationID || settings.PinnedAt == nil || settings.MutedUntil == nil || settings.ArchivedAt == nil {
+		t.Fatalf("unexpected settings response: %+v", settings)
+	}
+
+	defaultListReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=10", nil)
+	defaultListReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	defaultListRec := httptest.NewRecorder()
+	router.ServeHTTP(defaultListRec, defaultListReq)
+	if defaultListRec.Code != http.StatusOK {
+		t.Fatalf("expected default list status %d, got %d: %s", http.StatusOK, defaultListRec.Code, defaultListRec.Body.String())
+	}
+
+	var defaultList struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(defaultListRec.Body).Decode(&defaultList); err != nil {
+		t.Fatalf("decode default conversation list: %v", err)
+	}
+	if len(defaultList.Items) != 1 || defaultList.Items[0].ID != conversationID {
+		t.Fatalf("unexpected default list after archive: %+v", defaultList.Items)
+	}
+
+	includeArchivedReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=10&includeArchived=true", nil)
+	includeArchivedReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	includeArchivedRec := httptest.NewRecorder()
+	router.ServeHTTP(includeArchivedRec, includeArchivedReq)
+	if includeArchivedRec.Code != http.StatusOK {
+		t.Fatalf("expected includeArchived list status %d, got %d: %s", http.StatusOK, includeArchivedRec.Code, includeArchivedRec.Body.String())
+	}
+
+	var archivedList struct {
+		Items []struct {
+			ID         string     `json:"id"`
+			PinnedAt   *time.Time `json:"pinnedAt"`
+			MutedUntil *time.Time `json:"mutedUntil"`
+			ArchivedAt *time.Time `json:"archivedAt"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(includeArchivedRec.Body).Decode(&archivedList); err != nil {
+		t.Fatalf("decode includeArchived conversation list: %v", err)
+	}
+	if len(archivedList.Items) != 2 || archivedList.Items[0].ID != secondConversationID || archivedList.Items[1].ID != conversationID {
+		t.Fatalf("unexpected includeArchived order: %+v", archivedList.Items)
+	}
+	if archivedList.Items[0].PinnedAt == nil || archivedList.Items[0].MutedUntil == nil || archivedList.Items[0].ArchivedAt == nil {
+		t.Fatalf("expected archived pinned conversation settings in list: %+v", archivedList.Items[0])
+	}
+
+	syncSince := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	syncReq := httptest.NewRequest(http.MethodGet, "/api/v1/sync?since="+syncSince+"&limit=10", nil)
+	syncReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	syncRec := httptest.NewRecorder()
+	router.ServeHTTP(syncRec, syncReq)
+	if syncRec.Code != http.StatusOK {
+		t.Fatalf("expected sync with archived settings status %d, got %d: %s", http.StatusOK, syncRec.Code, syncRec.Body.String())
+	}
+
+	var syncResp struct {
+		Conversations []struct {
+			ID         string     `json:"id"`
+			PinnedAt   *time.Time `json:"pinnedAt"`
+			MutedUntil *time.Time `json:"mutedUntil"`
+			ArchivedAt *time.Time `json:"archivedAt"`
+		} `json:"conversations"`
+	}
+	if err := json.NewDecoder(syncRec.Body).Decode(&syncResp); err != nil {
+		t.Fatalf("decode sync with archived settings: %v", err)
+	}
+	if len(syncResp.Conversations) != 2 || syncResp.Conversations[0].ID != secondConversationID {
+		t.Fatalf("unexpected sync conversations with settings: %+v", syncResp.Conversations)
+	}
+	if syncResp.Conversations[0].PinnedAt == nil || syncResp.Conversations[0].MutedUntil == nil || syncResp.Conversations[0].ArchivedAt == nil {
+		t.Fatalf("expected archived settings in sync conversation: %+v", syncResp.Conversations[0])
+	}
+
+	clearRec := updateConversationSettings(t, router, bob.AccessToken, secondConversationID, []byte(`{"pinned":false,"mutedUntil":"","archived":false}`))
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("expected settings clear status %d, got %d: %s", http.StatusOK, clearRec.Code, clearRec.Body.String())
+	}
+
+	var cleared struct {
+		ConversationID string     `json:"conversationId"`
+		PinnedAt       *time.Time `json:"pinnedAt"`
+		MutedUntil     *time.Time `json:"mutedUntil"`
+		ArchivedAt     *time.Time `json:"archivedAt"`
+	}
+	if err := json.NewDecoder(clearRec.Body).Decode(&cleared); err != nil {
+		t.Fatalf("decode cleared settings response: %v", err)
+	}
+	if cleared.ConversationID != secondConversationID || cleared.PinnedAt != nil || cleared.MutedUntil != nil || cleared.ArchivedAt != nil {
+		t.Fatalf("unexpected cleared settings response: %+v", cleared)
+	}
+
+	clearedListReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?limit=10", nil)
+	clearedListReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	clearedListRec := httptest.NewRecorder()
+	router.ServeHTTP(clearedListRec, clearedListReq)
+	if clearedListRec.Code != http.StatusOK {
+		t.Fatalf("expected cleared list status %d, got %d: %s", http.StatusOK, clearedListRec.Code, clearedListRec.Body.String())
+	}
+
+	var clearedList struct {
+		Items []struct {
+			ID         string     `json:"id"`
+			PinnedAt   *time.Time `json:"pinnedAt"`
+			MutedUntil *time.Time `json:"mutedUntil"`
+			ArchivedAt *time.Time `json:"archivedAt"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(clearedListRec.Body).Decode(&clearedList); err != nil {
+		t.Fatalf("decode cleared conversation list: %v", err)
+	}
+	if len(clearedList.Items) != 2 {
+		t.Fatalf("expected two conversations after clear, got %+v", clearedList.Items)
+	}
+	for _, item := range clearedList.Items {
+		if item.ID == secondConversationID && (item.PinnedAt != nil || item.MutedUntil != nil || item.ArchivedAt != nil) {
+			t.Fatalf("expected cleared settings to be nil in list: %+v", item)
+		}
+	}
+}
+
 func TestSyncReturnsConversationsAndMessagesSinceCursor(t *testing.T) {
 	router := newSocialTestRouter(t)
 	alice, bob, conversationID := setupDirectConversation(t, router)
@@ -601,6 +800,17 @@ func editMessage(t *testing.T, router http.Handler, token, conversationID, messa
 	}
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/conversations/"+conversationID+"/messages/"+messageID, bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func updateConversationSettings(t *testing.T, router http.Handler, token, conversationID string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/conversations/"+conversationID+"/settings", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()

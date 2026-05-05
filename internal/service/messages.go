@@ -19,7 +19,8 @@ type MessageStore interface {
 	FindMessageByID(context.Context, string) (model.MessageView, error)
 	EditMessage(context.Context, string, string, string, string, time.Time) (model.MessageView, error)
 	RecallMessage(context.Context, string, string, string, time.Time) (model.MessageView, error)
-	ListConversations(context.Context, string, time.Time, int) ([]model.ConversationSummary, error)
+	ListConversations(context.Context, string, time.Time, int, bool) ([]model.ConversationSummary, error)
+	UpdateConversationSettings(context.Context, string, string, model.ConversationSettingsUpdate, time.Time) (model.ConversationSettings, error)
 	ListMessagesSince(context.Context, string, time.Time, time.Time, int) ([]model.MessageView, error)
 	ListMessages(context.Context, string, time.Time, int) ([]model.MessageView, error)
 	MarkConversationRead(context.Context, string, string, string, time.Time) (model.ReadThroughResult, error)
@@ -44,8 +45,9 @@ type MessageListFilter struct {
 }
 
 type ConversationListFilter struct {
-	Before time.Time
-	Limit  int
+	Before          time.Time
+	Limit           int
+	IncludeArchived bool
 }
 
 type SyncFilter struct {
@@ -67,6 +69,13 @@ type EditInput struct {
 	ConversationID string
 	MessageID      string
 	Body           string
+}
+
+type ConversationSettingsInput struct {
+	ConversationID string
+	Pinned         *bool
+	MutedUntil     *string
+	Archived       *bool
 }
 
 func NewMessageService(authService *AuthService, messageStore MessageStore) *MessageService {
@@ -157,7 +166,7 @@ func (s *MessageService) ListConversations(ctx context.Context, token string, fi
 		return nil, ErrInvalidInput
 	}
 
-	return s.store.ListConversations(ctx, actor.ID, filter.Before, filter.Limit)
+	return s.store.ListConversations(ctx, actor.ID, filter.Before, filter.Limit, filter.IncludeArchived)
 }
 
 func (s *MessageService) Sync(ctx context.Context, token string, filter SyncFilter) (model.SyncSnapshot, error) {
@@ -171,7 +180,7 @@ func (s *MessageService) Sync(ctx context.Context, token string, filter SyncFilt
 	}
 
 	serverTime := s.now().UTC()
-	conversations, err := s.store.ListConversations(ctx, actor.ID, time.Time{}, filter.Limit)
+	conversations, err := s.store.ListConversations(ctx, actor.ID, time.Time{}, filter.Limit, true)
 	if err != nil {
 		return model.SyncSnapshot{}, err
 	}
@@ -220,6 +229,48 @@ func (s *MessageService) MarkRead(ctx context.Context, token string, input ReadI
 		return model.ReadThroughResult{}, mapMessageStoreError(err)
 	}
 	return result, nil
+}
+
+func (s *MessageService) UpdateConversationSettings(ctx context.Context, token string, input ConversationSettingsInput) (model.ConversationSettings, error) {
+	actor, err := s.auth.CurrentUser(ctx, token)
+	if err != nil {
+		return model.ConversationSettings{}, err
+	}
+
+	conversationID := strings.TrimSpace(input.ConversationID)
+	if conversationID == "" {
+		return model.ConversationSettings{}, ErrInvalidInput
+	}
+	if input.Pinned == nil && input.MutedUntil == nil && input.Archived == nil {
+		return model.ConversationSettings{}, ErrInvalidInput
+	}
+	if err := s.requireConversationMember(ctx, conversationID, actor.ID); err != nil {
+		return model.ConversationSettings{}, err
+	}
+
+	now := s.now().UTC()
+	update := model.ConversationSettingsUpdate{
+		Pinned:   input.Pinned,
+		Archived: input.Archived,
+	}
+	if input.MutedUntil != nil {
+		update.UpdateMutedUntil = true
+		rawMutedUntil := strings.TrimSpace(*input.MutedUntil)
+		if rawMutedUntil != "" {
+			mutedUntil, err := time.Parse(time.RFC3339, rawMutedUntil)
+			if err != nil || !mutedUntil.After(now) {
+				return model.ConversationSettings{}, ErrInvalidInput
+			}
+			mutedUntil = mutedUntil.UTC()
+			update.MutedUntil = &mutedUntil
+		}
+	}
+
+	settings, err := s.store.UpdateConversationSettings(ctx, conversationID, actor.ID, update, now)
+	if err != nil {
+		return model.ConversationSettings{}, mapMessageStoreError(err)
+	}
+	return settings, nil
 }
 
 func (s *MessageService) EditMessage(ctx context.Context, token string, input EditInput) (model.MessageView, error) {
@@ -305,7 +356,7 @@ func (s *MessageService) requireConversationMemberForUser(ctx context.Context, c
 
 func mapMessageStoreError(err error) error {
 	switch {
-	case errors.Is(err, store.ErrConversationNotFound), errors.Is(err, store.ErrMessageNotFound):
+	case errors.Is(err, store.ErrConversationNotFound), errors.Is(err, store.ErrConversationMemberNotFound), errors.Is(err, store.ErrMessageNotFound):
 		return ErrNotFound
 	case errors.Is(err, store.ErrForbidden):
 		return ErrForbidden
