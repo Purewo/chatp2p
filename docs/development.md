@@ -21,6 +21,7 @@ HTTP_ADDR=:8081 APP_ENV=development LOG_LEVEL=debug go run ./cmd/server
 | `APP_NAME` | `chatp2p` | Service name returned by health checks and logs. |
 | `APP_ENV` | `development` | Runtime environment label. |
 | `HTTP_ADDR` | `:8080` | HTTP bind address. |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated browser origins allowed for frontend development. Use `*` only for temporary debugging. |
 | `DB_DRIVER` | `sqlite` | SQL driver name. Local development currently uses SQLite. |
 | `DB_DSN` | `file:chatp2p.db` | Database connection string. |
 | `JWT_SECRET` | `chatp2p-dev-secret-change-me` | Token signing secret. Override outside local development. |
@@ -32,6 +33,10 @@ HTTP_ADDR=:8081 APP_ENV=development LOG_LEVEL=debug go run ./cmd/server
 ## API Contract
 
 Keep `api/openapi.yaml` synchronized with every frontend-facing REST change. Do not merge API behavior that is not documented for frontend integration.
+
+## Frontend Development
+
+The browser client is expected to run on a separate dev server during integration. The backend allows cross-origin requests only for the origins listed in `CORS_ALLOWED_ORIGINS`, so update that variable if the frontend uses another host or port.
 
 ## GitHub Access
 

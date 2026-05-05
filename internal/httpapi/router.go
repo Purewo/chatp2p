@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"chatp2p/internal/realtime"
@@ -9,13 +10,14 @@ import (
 )
 
 type RouterOptions struct {
-	ServiceName string
-	Version     string
-	StartedAt   time.Time
-	Auth        *service.AuthService
-	Social      *service.SocialService
-	Messages    *service.MessageService
-	Realtime    *realtime.Hub
+	ServiceName        string
+	Version            string
+	StartedAt          time.Time
+	CORSAllowedOrigins []string
+	Auth               *service.AuthService
+	Social             *service.SocialService
+	Messages           *service.MessageService
+	Realtime           *realtime.Hub
 }
 
 type API struct {
@@ -81,5 +83,56 @@ func NewRouter(opts RouterOptions) http.Handler {
 	mux.HandleFunc("PATCH /api/v1/conversations/{conversationId}/messages/{messageId}", api.handleEditMessage)
 	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/messages/{messageId}/recall", api.handleRecallMessage)
 	mux.HandleFunc("POST /api/v1/conversations/{conversationId}/read", api.handleMarkConversationRead)
-	return mux
+	return withCORS(mux, opts.CORSAllowedOrigins)
+}
+
+func withCORS(next http.Handler, allowedOrigins []string) http.Handler {
+	if len(allowedOrigins) == 0 {
+		return next
+	}
+
+	allowed := make(map[string]struct{}, len(allowedOrigins))
+	allowAny := false
+	for _, origin := range allowedOrigins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		if origin == "*" {
+			allowAny = true
+			continue
+		}
+		allowed[origin] = struct{}{}
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		allowedOrigin := ""
+		switch {
+		case origin == "":
+		case allowAny:
+			allowedOrigin = "*"
+		default:
+			if _, ok := allowed[origin]; ok {
+				allowedOrigin = origin
+			}
+		}
+
+		if allowedOrigin != "" {
+			w.Header().Add("Vary", "Origin")
+			w.Header().Add("Vary", "Access-Control-Request-Method")
+			w.Header().Add("Vary", "Access-Control-Request-Headers")
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Max-Age", "600")
+		}
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }

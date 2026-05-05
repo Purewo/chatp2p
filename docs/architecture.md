@@ -1,6 +1,6 @@
 # Architecture Notes
 
-ChatP2P is a backend-only private chat system. Frontend clients will integrate through the REST OpenAPI contract and the WebSocket protocol documents maintained in this repository.
+ChatP2P is a backend-only private chat system. Frontend clients integrate through the REST OpenAPI contract and the WebSocket protocol documents maintained in this repository.
 
 ## Current Shape
 
