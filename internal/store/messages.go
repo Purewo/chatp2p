@@ -293,8 +293,8 @@ func (s *SQLiteUserStore) ListMessagesSince(ctx context.Context, userID string, 
 	return messages, nil
 }
 
-func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, before time.Time, limit int, includeArchived bool) ([]model.ConversationSummary, error) {
-	if limit <= 0 || limit > 100 {
+func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, cursor model.ConversationListCursor, before time.Time, limit int, includeArchived bool) ([]model.ConversationSummary, error) {
+	if limit <= 0 {
 		limit = 50
 	}
 
@@ -307,6 +307,11 @@ func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, 
 		includeArchivedValue = 1
 	}
 
+	cursorWhere, cursorArgs := conversationListCursorWhere(cursor)
+	args := []any{userID, beforeSeconds, beforeSeconds, includeArchivedValue}
+	args = append(args, cursorArgs...)
+	args = append(args, limit)
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT c.id, c.type, c.title, c.created_by, c.created_at, c.updated_at,
 		       self.pinned_at, self.muted_until, self.archived_at
@@ -314,10 +319,11 @@ func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, 
 		JOIN conversation_members self ON self.conversation_id = c.id
 		WHERE self.user_id = ?
 		  AND (? = 0 OR c.updated_at < ?)
-		  AND (? OR self.archived_at IS NULL)
+		  AND (? = 1 OR self.archived_at IS NULL)
+		  `+cursorWhere+`
 		ORDER BY (self.pinned_at IS NOT NULL) DESC, self.pinned_at DESC, c.updated_at DESC, c.id DESC
 		LIMIT ?
-	`, userID, beforeSeconds, beforeSeconds, includeArchivedValue, limit)
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list conversations: %w", err)
 	}
@@ -387,6 +393,29 @@ func (s *SQLiteUserStore) ListConversations(ctx context.Context, userID string, 
 	}
 
 	return conversations, nil
+}
+
+func conversationListCursorWhere(cursor model.ConversationListCursor) (string, []any) {
+	if !cursor.Valid {
+		return "", nil
+	}
+
+	if cursor.PinnedAt != nil {
+		pinnedAt := cursor.PinnedAt.UTC().Unix()
+		updatedAt := cursor.UpdatedAt.UTC().Unix()
+		return `
+		  AND (
+		    (self.pinned_at IS NOT NULL AND self.pinned_at < ?)
+		    OR (self.pinned_at IS NOT NULL AND self.pinned_at = ? AND c.updated_at < ?)
+		    OR (self.pinned_at IS NOT NULL AND self.pinned_at = ? AND c.updated_at = ? AND c.id < ?)
+		    OR self.pinned_at IS NULL
+		  )`, []any{pinnedAt, pinnedAt, updatedAt, pinnedAt, updatedAt, cursor.ID}
+	}
+
+	updatedAt := cursor.UpdatedAt.UTC().Unix()
+	return `
+	  AND self.pinned_at IS NULL
+	  AND (c.updated_at < ? OR (c.updated_at = ? AND c.id < ?))`, []any{updatedAt, updatedAt, cursor.ID}
 }
 
 func (s *SQLiteUserStore) UpdateConversationSettings(ctx context.Context, conversationID, userID string, update model.ConversationSettingsUpdate, now time.Time) (model.ConversationSettings, error) {

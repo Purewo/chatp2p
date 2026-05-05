@@ -9,8 +9,11 @@ Use `GET /api/v1/conversations` with `Authorization: Bearer <accessToken>`.
 Query parameters:
 
 - `limit`: optional, defaults to 50, maximum 100.
-- `before`: optional RFC3339 timestamp. When present, only conversations updated before this timestamp are returned.
+- `cursor`: optional opaque pagination cursor from the previous response's `nextCursor`.
+- `before`: optional legacy RFC3339 timestamp. Prefer `cursor` for stable pagination.
 - `includeArchived`: optional boolean, defaults to `false`. Archived conversations are hidden unless this is `true`.
+
+The response includes `nextCursor` when another page is available. Do not combine `cursor` and `before`.
 
 Each item includes:
 
@@ -20,7 +23,7 @@ Each item includes:
 - `unreadCount`: messages from other members that the current user has not marked read.
 - `pinnedAt`, `mutedUntil`, and `archivedAt`: per-user settings when present.
 
-The list is ordered by pinned conversations first, then latest activity.
+The list is ordered by pinned conversations first, then latest activity. Cursor pagination uses the same composite order, including `pinnedAt`, `updatedAt`, and `id`, so pinned conversations page consistently.
 For direct conversations with an empty stored title, the summary title is derived from the other member's display name or username.
 
 ## Conversation Settings

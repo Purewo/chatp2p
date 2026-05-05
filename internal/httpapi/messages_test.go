@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -529,6 +530,119 @@ func TestConversationSettingsUpdatePinsArchivesAndFiltersList(t *testing.T) {
 	}
 }
 
+func TestConversationListCursorPaginatesPinnedAndUnpinnedConversations(t *testing.T) {
+	router := newSocialTestRouter(t)
+	bob := registerSocialUser(t, router, "bob", "Bob")
+	alice := registerSocialUser(t, router, "alice", "Alice")
+	carol := registerSocialUser(t, router, "carol", "Carol")
+	dave := registerSocialUser(t, router, "dave", "Dave")
+	erin := registerSocialUser(t, router, "erin", "Erin")
+
+	conversationIDs := []string{
+		createDirectConversationBetween(t, router, bob, alice),
+		createDirectConversationBetween(t, router, bob, carol),
+		createDirectConversationBetween(t, router, bob, dave),
+		createDirectConversationBetween(t, router, bob, erin),
+	}
+	pinned := map[string]bool{
+		conversationIDs[0]: true,
+		conversationIDs[2]: true,
+	}
+
+	for conversationID := range pinned {
+		rec := updateConversationSettings(t, router, bob.AccessToken, conversationID, []byte(`{"pinned":true}`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected pin status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+		}
+	}
+
+	seen := map[string]bool{}
+	var ordered []string
+	cursor := ""
+	firstCursor := ""
+	for page := 0; ; page++ {
+		if page > len(conversationIDs) {
+			t.Fatalf("pagination did not terminate, ordered=%+v cursor=%q", ordered, cursor)
+		}
+
+		path := "/api/v1/conversations?limit=1"
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected paged list status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+		}
+
+		var pageResp struct {
+			Items []struct {
+				ID string `json:"id"`
+			} `json:"items"`
+			NextCursor string `json:"nextCursor"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&pageResp); err != nil {
+			t.Fatalf("decode paged conversation list: %v", err)
+		}
+		if len(pageResp.Items) != 1 {
+			t.Fatalf("expected one item per page, got %+v", pageResp.Items)
+		}
+
+		conversationID := pageResp.Items[0].ID
+		if seen[conversationID] {
+			t.Fatalf("duplicate conversation in cursor pagination: %s ordered=%+v", conversationID, ordered)
+		}
+		seen[conversationID] = true
+		ordered = append(ordered, conversationID)
+		if page == 0 {
+			firstCursor = pageResp.NextCursor
+			if firstCursor == "" {
+				t.Fatal("expected nextCursor on first page")
+			}
+		}
+		if pageResp.NextCursor == "" {
+			break
+		}
+		cursor = pageResp.NextCursor
+	}
+
+	if len(ordered) != len(conversationIDs) {
+		t.Fatalf("expected all conversations through cursor pagination, got %+v", ordered)
+	}
+	for _, conversationID := range conversationIDs {
+		if !seen[conversationID] {
+			t.Fatalf("missing conversation %s in cursor pagination ordered=%+v", conversationID, ordered)
+		}
+	}
+	for i, conversationID := range ordered {
+		if i < len(pinned) && !pinned[conversationID] {
+			t.Fatalf("expected pinned conversations first, got order %+v", ordered)
+		}
+		if i >= len(pinned) && pinned[conversationID] {
+			t.Fatalf("expected unpinned conversations after pinned, got order %+v", ordered)
+		}
+	}
+
+	badCursorReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?cursor=not-a-cursor", nil)
+	badCursorReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	badCursorRec := httptest.NewRecorder()
+	router.ServeHTTP(badCursorRec, badCursorReq)
+	if badCursorRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid cursor status %d, got %d: %s", http.StatusBadRequest, badCursorRec.Code, badCursorRec.Body.String())
+	}
+
+	before := time.Now().UTC().Format(time.RFC3339)
+	combinedReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations?before="+url.QueryEscape(before)+"&cursor="+url.QueryEscape(firstCursor), nil)
+	combinedReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	combinedRec := httptest.NewRecorder()
+	router.ServeHTTP(combinedRec, combinedReq)
+	if combinedRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected combined before and cursor status %d, got %d: %s", http.StatusBadRequest, combinedRec.Code, combinedRec.Body.String())
+	}
+}
+
 func TestSyncReturnsConversationsAndMessagesSinceCursor(t *testing.T) {
 	router := newSocialTestRouter(t)
 	alice, bob, conversationID := setupDirectConversation(t, router)
@@ -707,7 +821,13 @@ func setupDirectConversation(t *testing.T, router http.Handler) (socialSession, 
 	alice := registerSocialUser(t, router, "alice", "Alice")
 	bob := registerSocialUser(t, router, "bob", "Bob")
 
-	requestResp := sendRequestResponse(t, router, alice.AccessToken, bob.User.ID)
+	return alice, bob, createDirectConversationBetween(t, router, alice, bob)
+}
+
+func createDirectConversationBetween(t *testing.T, router http.Handler, requester, addressee socialSession) string {
+	t.Helper()
+
+	requestResp := sendRequestResponse(t, router, requester.AccessToken, addressee.User.ID)
 	if requestResp.Code != http.StatusCreated {
 		t.Fatalf("expected friend request status %d, got %d: %s", http.StatusCreated, requestResp.Code, requestResp.Body)
 	}
@@ -720,7 +840,7 @@ func setupDirectConversation(t *testing.T, router http.Handler) (socialSession, 
 	}
 
 	acceptReq := httptest.NewRequest(http.MethodPost, "/api/v1/friend-requests/"+friendRequest.ID+"/accept", nil)
-	acceptReq.Header.Set("Authorization", "Bearer "+bob.AccessToken)
+	acceptReq.Header.Set("Authorization", "Bearer "+addressee.AccessToken)
 	acceptRec := httptest.NewRecorder()
 	router.ServeHTTP(acceptRec, acceptReq)
 	if acceptRec.Code != http.StatusOK {
@@ -739,7 +859,7 @@ func setupDirectConversation(t *testing.T, router http.Handler) (socialSession, 
 		t.Fatal("expected conversation id")
 	}
 
-	return alice, bob, accepted.Conversation.ID
+	return accepted.Conversation.ID
 }
 
 func sendTextMessage(t *testing.T, router http.Handler, token, conversationID, body string) string {

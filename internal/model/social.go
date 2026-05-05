@@ -74,6 +74,13 @@ type ConversationSummary struct {
 	UpdatedAt   time.Time    `json:"updatedAt"`
 }
 
+type ConversationListCursor struct {
+	Valid     bool
+	PinnedAt  *time.Time
+	UpdatedAt time.Time
+	ID        string
+}
+
 type ConversationSettings struct {
 	ConversationID string     `json:"conversationId"`
 	PinnedAt       *time.Time `json:"pinnedAt,omitempty"`

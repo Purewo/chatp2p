@@ -442,10 +442,17 @@ paths:
         - name: before
           in: query
           required: false
+          deprecated: true
           schema:
             type: string
             format: date-time
-          description: Returns conversations updated before this timestamp.
+          description: Legacy timestamp filter for conversation lists. Prefer `cursor` for stable pagination.
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque pagination cursor returned by the previous list response. Do not combine with `before`.
         - name: limit
           in: query
           required: false
@@ -463,7 +470,7 @@ paths:
           description: Include conversations archived by the current user. Archived conversations are hidden by default.
       responses:
         "200":
-          description: Conversations ordered by latest activity first.
+          description: Conversations ordered by pinned state, pin time, then latest activity.
           content:
             application/json:
               schema:
@@ -1325,6 +1332,9 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ConversationSummary"
+        nextCursor:
+          type: string
+          description: Opaque cursor for fetching the next page. Omitted when there are no more results.
     ConversationSummary:
       type: object
       required:

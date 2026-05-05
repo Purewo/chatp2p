@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -19,7 +21,7 @@ type MessageStore interface {
 	FindMessageByID(context.Context, string) (model.MessageView, error)
 	EditMessage(context.Context, string, string, string, string, time.Time) (model.MessageView, error)
 	RecallMessage(context.Context, string, string, string, time.Time) (model.MessageView, error)
-	ListConversations(context.Context, string, time.Time, int, bool) ([]model.ConversationSummary, error)
+	ListConversations(context.Context, string, model.ConversationListCursor, time.Time, int, bool) ([]model.ConversationSummary, error)
 	UpdateConversationSettings(context.Context, string, string, model.ConversationSettingsUpdate, time.Time) (model.ConversationSettings, error)
 	ListMessagesSince(context.Context, string, time.Time, time.Time, int) ([]model.MessageView, error)
 	ListMessages(context.Context, string, time.Time, int) ([]model.MessageView, error)
@@ -46,8 +48,14 @@ type MessageListFilter struct {
 
 type ConversationListFilter struct {
 	Before          time.Time
+	Cursor          string
 	Limit           int
 	IncludeArchived bool
+}
+
+type ConversationListPage struct {
+	Items      []model.ConversationSummary
+	NextCursor string
 }
 
 type SyncFilter struct {
@@ -76,6 +84,12 @@ type ConversationSettingsInput struct {
 	Pinned         *bool
 	MutedUntil     *string
 	Archived       *bool
+}
+
+type conversationListCursorPayload struct {
+	PinnedAt  *time.Time `json:"pinnedAt,omitempty"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+	ID        string     `json:"id"`
 }
 
 func NewMessageService(authService *AuthService, messageStore MessageStore) *MessageService {
@@ -156,17 +170,87 @@ func (s *MessageService) ListMessages(ctx context.Context, token string, filter 
 	return s.store.ListMessages(ctx, conversationID, filter.Before, filter.Limit)
 }
 
-func (s *MessageService) ListConversations(ctx context.Context, token string, filter ConversationListFilter) ([]model.ConversationSummary, error) {
+func (s *MessageService) ListConversations(ctx context.Context, token string, filter ConversationListFilter) (ConversationListPage, error) {
 	actor, err := s.auth.CurrentUser(ctx, token)
 	if err != nil {
-		return nil, err
+		return ConversationListPage{}, err
 	}
 
-	if filter.Limit < 0 || filter.Limit > 100 {
-		return nil, ErrInvalidInput
+	if filter.Limit < 0 || filter.Limit > 100 || (filter.Cursor != "" && !filter.Before.IsZero()) {
+		return ConversationListPage{}, ErrInvalidInput
 	}
 
-	return s.store.ListConversations(ctx, actor.ID, filter.Before, filter.Limit, filter.IncludeArchived)
+	limit := filter.Limit
+	if limit == 0 {
+		limit = 50
+	}
+
+	cursor, err := decodeConversationListCursor(filter.Cursor)
+	if err != nil {
+		return ConversationListPage{}, ErrInvalidInput
+	}
+
+	conversations, err := s.store.ListConversations(ctx, actor.ID, cursor, filter.Before, limit+1, filter.IncludeArchived)
+	if err != nil {
+		return ConversationListPage{}, err
+	}
+
+	page := ConversationListPage{Items: conversations}
+	if len(page.Items) > limit {
+		page.Items = page.Items[:limit]
+		nextCursor, err := encodeConversationListCursor(page.Items[len(page.Items)-1])
+		if err != nil {
+			return ConversationListPage{}, err
+		}
+		page.NextCursor = nextCursor
+	}
+	return page, nil
+}
+
+func decodeConversationListCursor(raw string) (model.ConversationListCursor, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return model.ConversationListCursor{}, nil
+	}
+
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return model.ConversationListCursor{}, err
+	}
+
+	var payload conversationListCursorPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return model.ConversationListCursor{}, err
+	}
+	payload.ID = strings.TrimSpace(payload.ID)
+	if payload.ID == "" || payload.UpdatedAt.IsZero() {
+		return model.ConversationListCursor{}, ErrInvalidInput
+	}
+
+	cursor := model.ConversationListCursor{
+		Valid:     true,
+		PinnedAt:  payload.PinnedAt,
+		UpdatedAt: payload.UpdatedAt.UTC(),
+		ID:        payload.ID,
+	}
+	if cursor.PinnedAt != nil {
+		pinnedAt := cursor.PinnedAt.UTC()
+		cursor.PinnedAt = &pinnedAt
+	}
+	return cursor, nil
+}
+
+func encodeConversationListCursor(conversation model.ConversationSummary) (string, error) {
+	payload := conversationListCursorPayload{
+		PinnedAt:  conversation.PinnedAt,
+		UpdatedAt: conversation.UpdatedAt.UTC(),
+		ID:        conversation.ID,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(data), nil
 }
 
 func (s *MessageService) Sync(ctx context.Context, token string, filter SyncFilter) (model.SyncSnapshot, error) {
@@ -180,7 +264,7 @@ func (s *MessageService) Sync(ctx context.Context, token string, filter SyncFilt
 	}
 
 	serverTime := s.now().UTC()
-	conversations, err := s.store.ListConversations(ctx, actor.ID, time.Time{}, filter.Limit, true)
+	conversations, err := s.store.ListConversations(ctx, actor.ID, model.ConversationListCursor{}, time.Time{}, filter.Limit, true)
 	if err != nil {
 		return model.SyncSnapshot{}, err
 	}

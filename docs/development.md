@@ -121,6 +121,9 @@ curl -X PATCH http://localhost:8080/api/v1/conversations/<conversationId>/settin
 
 curl "http://localhost:8080/api/v1/conversations?includeArchived=true" \
   -H "Authorization: Bearer <bobToken>"
+
+curl "http://localhost:8080/api/v1/conversations?limit=20&cursor=<nextCursor>" \
+  -H "Authorization: Bearer <bobToken>"
 ```
 
 ## WebSocket Check

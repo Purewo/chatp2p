@@ -29,7 +29,8 @@ type messageListResponse struct {
 }
 
 type conversationListResponse struct {
-	Items []model.ConversationSummary `json:"items"`
+	Items      []model.ConversationSummary `json:"items"`
+	NextCursor string                      `json:"nextCursor,omitempty"`
 }
 
 type markReadRequest struct {
@@ -99,8 +100,9 @@ func (api *API) handleListConversations(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	conversations, err := api.messages.ListConversations(r.Context(), token, service.ConversationListFilter{
+	page, err := api.messages.ListConversations(r.Context(), token, service.ConversationListFilter{
 		Before:          before,
+		Cursor:          r.URL.Query().Get("cursor"),
 		Limit:           limit,
 		IncludeArchived: includeArchived,
 	})
@@ -109,7 +111,10 @@ func (api *API) handleListConversations(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, conversationListResponse{Items: conversations})
+	writeJSON(w, http.StatusOK, conversationListResponse{
+		Items:      page.Items,
+		NextCursor: page.NextCursor,
+	})
 }
 
 func (api *API) handleUpdateConversationSettings(w http.ResponseWriter, r *http.Request) {
