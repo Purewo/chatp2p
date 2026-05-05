@@ -13,6 +13,7 @@ For browser development on a separate dev server, make sure the backend `CORS_AL
 
 - OpenAPI contract: `GET /api/v1/docs/openapi.yaml`
 - Recently updated docs: `GET /api/v1/docs/recent?limit=5`
+- Next session handoff: `docs/next-session.md`
 
 The recent docs endpoint returns Markdown document content directly, ordered by server-side file update time.
 
